@@ -1,4 +1,5 @@
 #include "agent.h"
+#include "benchmark.h"
 #include <iostream>
 #include <stdexcept>
 using namespace t2s;
@@ -52,6 +53,33 @@ int main() {
     check(body["stream"]==false&&body["thinking"]["type"]=="disabled"&&body["tool_choice"]=="auto","request API parameters");
     Completion baseline=[](const Json&,const Json& tools){check(tools.empty(),"baseline no tools");return Json{{"message",{{"role","assistant"},{"content","```sql\nSELECT COUNT(*) FROM employees\n```"}}},{"usage",{{"total_tokens",7}}}};};
     auto base=run_baseline(*company,"count",baseline);check(base["success"]&&base["usage"]["total_tokens"]==7,"baseline");
+    auto gold=company->execute("SELECT name,salary FROM employees ORDER BY name");
+    auto reversed=company->execute("SELECT name,salary FROM employees ORDER BY name DESC");
+    check(equivalent_results(gold,reversed,false),"unordered equivalence");
+    check(!equivalent_results(gold,reversed,true),"ordered difference");
+    check(!equivalent_results(company->execute("SELECT salary,name FROM employees"),gold,false),"positional columns");
+    check(!equivalent_results(company->execute("SELECT 1 UNION ALL SELECT 1"),company->execute("SELECT 1 UNION ALL SELECT 2"),false),"duplicate multiplicity");
+    check(equivalent_results(company->execute("SELECT 1"),company->execute("SELECT 1.0"),false),"numeric equivalence");
+    check(!equivalent_results(company->execute("SELECT '1'"),company->execute("SELECT 1"),false),"text numeric difference");
+    auto trunc=gold;trunc["truncated"]=true;check(!equivalent_results(trunc,gold,false),"truncated not comparable");
+    check(has_outer_order_by("SELECT x FROM (SELECT 1 AS x ORDER BY x) ORDER /* comment */ BY x"),"outer ordering");
+    check(!has_outer_order_by("SELECT 'ORDER BY' FROM (SELECT 1 ORDER BY 1) -- ORDER BY\n"),"inner ordering ignored");
+    check(!company->execute("SELECT * FROM pragma_table_info('employees')")["success"],"table valued pragma denied");
+    check(!company->execute("VACUUM INTO '/tmp/text2sql-should-not-exist.sqlite'")["success"],"vacuum denied");
+    check(!company->execute("SELECT writefile('/tmp/text2sql-should-not-exist.txt', 'x')")["success"],"file functions denied");
+    check(company->execute("WITH x AS (SELECT COUNT(*) AS n FROM employees) SELECT n FROM x")["success"],"CTE allowed");
+    check(company->execute("SELECT ROW_NUMBER() OVER (ORDER BY salary) FROM employees")["success"],"window allowed");
+    DatabaseOptions tiny;tiny.max_result_bytes=20;
+    auto capped=Database::from_sql("CREATE TABLE t(x TEXT); INSERT INTO t VALUES('long enough to exceed byte limit');",tiny);
+    check(capped->execute("SELECT x FROM t")["truncated"],"result bytes limit");
+    auto unusual=Database::from_sql("CREATE TABLE \"sqliteX\"(\"a\"\"b\" INTEGER PRIMARY KEY); CREATE TABLE \"订单 明细\"(\"商品名\" TEXT); INSERT INTO \"订单 明细\" VALUES('Apple');");
+    check(unusual->list_tables().size()==2,"sqliteX table name allowed");
+    check(unusual->describe_tables({"sqliteX"})[0]["columns"][0]["name"]=="a\"b","quoted identifier schema");
+    check(unusual->execute("SELECT \"商品名\" FROM \"订单 明细\"")["rows"][0][0]=="Apple","unicode arbitrary schema");
+    bool injection=false;try{unusual->describe_tables({"sqliteX\"); DROP TABLE sqliteX; --"});}catch(...){injection=true;}check(injection&&unusual->list_tables().size()==2,"schema identifier injection rejected");
+    check(!company->execute("SELECT \"not_a_column\" FROM employees")["success"],"double quoted typo denied");
+    DatabaseOptions reference_options;reference_options.reference_double_quoted_strings=true;
+    auto ref=Database::from_sql("",reference_options);check(ref->execute("SELECT \"historical string literal\"")["success"],"reference DQS compatibility");
     std::cout<<"Passed "<<checks<<" checks\n"; return 0;
  } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n';return 1; }
 }

@@ -10,6 +10,8 @@ struct DatabaseOptions {
     int max_preview_rows = 10;
     int max_sql_bytes = 16384;
     int max_result_bytes = 1048576;
+    // Evaluation-only support for historical Spider reference SQL literals.
+    bool reference_double_quoted_strings = false;
 };
 class Database {
 public:

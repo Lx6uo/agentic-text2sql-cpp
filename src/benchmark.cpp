@@ -42,13 +42,23 @@ bool cell_equal(const Json& a,const Json& b) {
 bool rows_equal(const Json& a,const Json& b,const std::vector<size_t>& columns,bool ordered) {
     auto same=[&](const Json& x,const Json& y){for(size_t c=0;c<columns.size();++c)if(!cell_equal(x[columns[c]],y[c]))return false;return true;};
     if(ordered){for(size_t r=0;r<a.size();++r)if(!same(a[r],b[r]))return false;return true;}
-    // Preserve duplicate multiplicity; each reference row matches exactly one prediction.
-    std::vector<bool> used(a.size());
-    for(const auto& row:b) {
-        bool found=false;
-        for(size_t r=0;r<a.size();++r)if(!used[r]&&same(a[r],row)){used[r]=true;found=true;break;}
-        if(!found)return false;
-    }
+    // Sort row indices to preserve duplicates without quadratic matching cost.
+    auto less_cell=[](const Json& x,const Json& y) {
+        if(x.is_number()&&y.is_number())return x.get<long double>()<y.get<long double>();
+        if(x.type()!=y.type())return static_cast<int>(x.type())<static_cast<int>(y.type());
+        return x<y;
+    };
+    std::vector<size_t> ai(a.size()),bi(b.size());std::iota(ai.begin(),ai.end(),0);std::iota(bi.begin(),bi.end(),0);
+    auto less_row=[&](const Json& x,const Json& y,bool prediction) {
+        for(size_t c=0;c<columns.size();++c) {
+            const auto& xc=x[prediction?columns[c]:c];const auto& yc=y[prediction?columns[c]:c];
+            if(less_cell(xc,yc))return true;if(less_cell(yc,xc))return false;
+        }
+        return false;
+    };
+    std::sort(ai.begin(),ai.end(),[&](size_t x,size_t y){return less_row(a[x],a[y],true);});
+    std::sort(bi.begin(),bi.end(),[&](size_t x,size_t y){return less_row(b[x],b[y],false);});
+    for(size_t r=0;r<ai.size();++r)if(!same(a[ai[r]],b[bi[r]]))return false;
     return true;
 }
 bool contained(const fs::path& path,const fs::path& root) {
@@ -129,7 +139,8 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
     records.write(metadata.dump()+"\n");
     struct Stats {int n=0,execution=0,matches=0,comparable=0,completed=0;double steps=0,attempts=0,time=0;Json tokens=Json::object();};
     std::map<std::string,Stats> stats;
-    for(size_t i=0;i<count&&!cancelled;++i) {
+    std::string abort_reason;
+    for(size_t i=0;i<count&&!cancelled&&abort_reason.empty();++i) {
         const auto& example=examples[i];auto id=example["db_id"].get<std::string>();auto question=example["question"].get<std::string>();
         for(const auto& mode:modes) {
             if(cancelled)break;
@@ -142,6 +153,7 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
                 // The reference SQL is never passed to complete / agent.
                 auto run=mode=="baseline"?run_baseline(db,question,complete,o.verbose):run_agent(db,question,complete,config.agent,o.verbose);
                 record["agent"]=run; s.steps+=run["agent_steps"].get<int>();s.attempts+=run["sql_attempts"].get<int>();s.time+=run["elapsed_ms"].get<double>();
+                if(run["termination"]=="api_error")abort_reason=run["error"].get<std::string>();
                 if(run["success"].get<bool>())++s.completed;
                 for(auto& [key,value]:run["usage"].items())if(value.is_number_integer())s.tokens[key]=s.tokens.value(key,int64_t(0))+value.get<int64_t>();
                 auto query=run["query"];
@@ -152,7 +164,9 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
                 }
                 DatabaseOptions evaluation=config.database; evaluation.max_display_rows=100000;evaluation.max_result_bytes=16*1024*1024;
                 Database evaluate(path.string(),evaluation);
-                auto gold=evaluate.execute(example["query"].get<std::string>());
+                DatabaseOptions reference_options=evaluation;reference_options.reference_double_quoted_strings=true;
+                Database reference(path.string(),reference_options);
+                auto gold=reference.execute(example["query"].get<std::string>());
                 record["reference_success"]=gold["success"];record["reference_error"]=gold["error"];record["reference_truncated"]=gold["truncated"];
                 if(!query.is_null()&&query["success"].get<bool>()&&gold["success"].get<bool>()) {
                     auto predicted=evaluate.execute(query["sql"].get<std::string>());
@@ -166,9 +180,10 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
             auto sql=record["predicted_sql"].get<std::string>();for(char& c:sql)if(c=='\n'||c=='\r'||c=='\t')c=' ';
             predictions[mode]->write(sql+"\t"+id+"\n");
             std::cerr<<"[benchmark "<<mode<<" "<<i+1<<"/"<<count<<"] "<<id<<": execution="<<record["execution_success"]<<", match="<<record["result_match"]<<'\n';
+            if(!abort_reason.empty())break;
         }
     }
-    Json summary{{"type","summary"},{"success",!cancelled},{"cancelled",cancelled!=0},{"output",output.string()},{"predictions",paths},
+    Json summary{{"type","summary"},{"success",!cancelled&&abort_reason.empty()},{"cancelled",cancelled!=0},{"requested_cases_per_mode",count},{"error",abort_reason.empty()?Json(nullptr):Json(abort_reason)},{"output",output.string()},{"predictions",paths},
         {"metric",metadata["metric"]},{"modes",Json::object()}};
     for(const auto& mode:modes) {
         const auto& s=stats[mode];double n=s.n?s.n:1;

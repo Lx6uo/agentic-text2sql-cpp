@@ -68,6 +68,7 @@ void Database::harden() {
         throw std::runtime_error("Invalid database limits");
     sqlite3_db_config(db_, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
     sqlite3_db_config(db_, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr);
+    sqlite3_db_config(db_, SQLITE_DBCONFIG_DQS_DML, options_.reference_double_quoted_strings ? 1 : 0, nullptr);
     sqlite3_exec(db_, "PRAGMA query_only=ON", nullptr, nullptr, nullptr);
     sqlite3_busy_timeout(db_, options_.timeout_ms);
     sqlite3_limit(db_, SQLITE_LIMIT_LENGTH, 1048576);
@@ -121,7 +122,7 @@ Json Database::internal_query(const std::string& sql) {
     return out;
 }
 Json Database::list_tables() {
-    return internal_query("SELECT name, type FROM sqlite_schema WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name");
+    return internal_query("SELECT name, type FROM sqlite_schema WHERE type IN ('table','view') AND name NOT GLOB 'sqlite_*' ORDER BY name");
 }
 Json Database::describe_tables(const std::vector<std::string>& names) {
     auto tables = list_tables(); Json result = Json::array();
@@ -158,6 +159,7 @@ Json Database::execute(const std::string& sql, int row_limit) {
         if (tail && (sqlite3_prepare_v3(db_, tail, -1, 0, &extra.ptr, nullptr) != SQLITE_OK || extra.ptr))
             throw std::runtime_error("Multiple SQL statements are forbidden");
         if (!sqlite3_stmt_readonly(stmt.ptr)) throw std::runtime_error("Only read-only SQL is allowed");
+        if (Clock::now() >= deadline_) { timed_out_=true; throw std::runtime_error("Query timed out"); }
         int count = sqlite3_column_count(stmt.ptr);
         if (!count) throw std::runtime_error("Expected a result-producing query");
         for (int c=0;c<count;++c) result["columns"].push_back(sqlite3_column_name(stmt.ptr,c));
@@ -175,6 +177,7 @@ Json Database::execute(const std::string& sql, int row_limit) {
             result["rows"].push_back(std::move(row));
         }
         if (status != SQLITE_DONE && status != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(db_));
+        if (Clock::now() >= deadline_) { timed_out_=true; throw std::runtime_error("Query timed out"); }
         result["success"] = true;
     } catch (const std::exception& e) {
         result["error"] = timed_out_ ? "Query timed out" : (cancelled ? "Query cancelled" : e.what());

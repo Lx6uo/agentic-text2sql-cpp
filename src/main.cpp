@@ -106,6 +106,7 @@ void table(const Json& q) {
     std::cout<<rows.size()<<" row(s)"<<(q.value("truncated",false)?" (truncated)":"")<<'\n';
 }
 void print_result(const Json& r,bool json,bool verbose) {
+    if(r.contains("error")&&!r["error"].is_null())std::cerr<<"Error: "<<safe_text(r["error"].get<std::string>())<<'\n';
     if(json){std::cout<<r.dump(-1,' ',false,Json::error_handler_t::replace)<<'\n';return;}
     if(r.contains("mode"))std::cout<<r["mode"].get<std::string>()<<'\n';
     if(r.contains("query")&&!r["query"].is_null()) {
@@ -114,7 +115,6 @@ void print_result(const Json& r,bool json,bool verbose) {
         if(q["success"].get<bool>()){std::cout<<"\nResults:\n";table(q);}
     }
     if(r.contains("answer")&&!r["answer"].get<std::string>().empty())std::cout<<'\n'<<safe_text(r["answer"].get<std::string>())<<'\n';
-    if(r.contains("error")&&!r["error"].is_null())std::cerr<<"Error: "<<safe_text(r["error"].get<std::string>())<<'\n';
     if(verbose&&r.contains("agent_steps"))std::cout<<"Agent steps: "<<r["agent_steps"]<<", SQL attempts: "<<r["sql_attempts"]<<", repairs: "<<r["repairs"]<<", elapsed: "<<r["elapsed_ms"]<<" ms\n";
 }
 void show_schema(Database& db,bool json) {

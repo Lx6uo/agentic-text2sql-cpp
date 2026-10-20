@@ -126,7 +126,7 @@ Json curl_post(const ApiOptions& api,const Json& body) {
     while(!eof||!child.reaped) {
         if(cancelled)throw std::runtime_error("API request cancelled");
         if(elapsed_ms(start)>(api.timeout_seconds+2)*1000.0)throw std::runtime_error("API request timed out");
-        pollfd p{child.fd,POLLIN,0};poll(&p,1,50);
+        pollfd p{eof?-1:child.fd,POLLIN,0};poll(&p,1,50);
         char buffer[8192];
         while(true) {
             auto n=read(child.fd,buffer,sizeof(buffer));
