@@ -38,8 +38,8 @@ int main() {
     check(run_agent(*company,"bad",fail,no_repair)["termination"]=="repair_limit","repair limit");
     auto invalid=[count=0](const Json& messages,const Json&)mutable {
         if(count++==0)return Json{{"message",{{"role","assistant"},{"content",nullptr},{"tool_calls",{tool_call("x","unknown",Json::object()),tool_call("y","execute_sql",Json::object()),tool_call("z","describe_tables",{{"tables",{1}}})}}}}};
-        check(messages.size()==5,"all tool results in context");
-        for(size_t i=2;i<5;++i)check(messages[i]["role"]=="tool"&&messages[i].contains("tool_call_id"),"tool_call_id context");
+        check(messages.size()==6,"all tool results in context");
+        for(size_t i=3;i<6;++i)check(messages[i]["role"]=="tool"&&messages[i].contains("tool_call_id"),"tool_call_id context");
         return Json{{"message",{{"role","assistant"},{"content","Cannot answer"}}}};
     };
     auto bad=run_agent(*company,"bad",invalid);check(bad["termination"]=="unable_to_answer"&&bad["trace"].size()==3,"invalid calls bounded");

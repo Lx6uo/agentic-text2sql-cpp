@@ -1,0 +1,4 @@
+#pragma once
+namespace t2s {
+inline constexpr const char* demo_sql = R"DEMO_SQL(@DEMO_SQL@)DEMO_SQL";
+}
