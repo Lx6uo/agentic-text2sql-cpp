@@ -1,0 +1,11 @@
+{
+  "api": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key": "",
+    "timeout_seconds": 45,
+    "max_tokens": 2048
+  },
+  "agent": { "max_steps": 8, "max_sql_attempts": 3, "max_repairs": 2 },
+  "database": { "timeout_ms": 5000, "max_display_rows": 100, "max_preview_rows": 10 }
+}
