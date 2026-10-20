@@ -32,7 +32,7 @@ int main() {
     check(repaired["success"]&&repaired["sql_attempts"]==2&&repaired["repairs"]==1,"repair agent");
     AgentOptions few;few.max_steps=2;
     check(run_agent(*company,"top salaries",mock_demo(),few)["termination"]=="step_limit","step limit");
-    Completion fail=[](const Json&,const Json&){return Json{{"message",{{"role","assistant"},{"content",nullptr},{"tool_calls",{tool_call("id"+std::to_string(checks++),"execute_sql",{{"sql","SELECT nonexistent FROM employees"}})}}}}};};
+    Completion fail=[sequence=0](const Json&,const Json&)mutable{return Json{{"message",{{"role","assistant"},{"content",nullptr},{"tool_calls",{tool_call("id"+std::to_string(sequence++),"execute_sql",{{"sql","SELECT nonexistent FROM employees"}})}}}}};};
     auto repeated=run_agent(*company,"bad",fail);
     check(!repeated["success"]&&repeated["sql_attempts"]==3&&repeated["termination"]=="sql_attempt_limit","attempt limit");
     AgentOptions no_repair;no_repair.max_repairs=0;
@@ -80,6 +80,27 @@ int main() {
     check(!company->execute("SELECT \"not_a_column\" FROM employees")["success"],"double quoted typo denied");
     DatabaseOptions reference_options;reference_options.reference_double_quoted_strings=true;
     auto ref=Database::from_sql("",reference_options);check(ref->execute("SELECT \"historical string literal\"")["success"],"reference DQS compatibility");
+    auto arbitrary=[step=0](const Json& messages,const Json&)mutable {
+        Json m{{"role","assistant"},{"content",nullptr}};
+        if(step==0)m["tool_calls"]={tool_call("s","describe_tables",{{"tables",{"订单 明细"}}})};
+        else if(step==1) {
+            check(messages.back()["content"].get<std::string>().find("商品名")!=std::string::npos,"actual arbitrary schema in context");
+            m["tool_calls"]={tool_call("q","execute_sql",{{"sql","SELECT \"商品名\" FROM \"订单 明细\""}})};
+        }else m["content"]="Apple";
+        ++step;return Json{{"message",m}};
+    };
+    auto arbitrary_result=run_agent(*unusual,"商品有哪些",arbitrary);
+    check(arbitrary_result["success"]&&arbitrary_result["query"]["rows"][0][0]=="Apple","agent arbitrary schema and different tool order");
+    auto invalid_json_args=[step=0](const Json&,const Json&)mutable {
+        Json m{{"role","assistant"},{"content",nullptr}};
+        if(step++==0) {
+            auto call=tool_call("bad-args","execute_sql",Json::object());call["function"]["arguments"]="{";m["tool_calls"]={call};
+        }else m["content"]="Cannot answer";
+        return Json{{"message",m}};
+    };
+    check(run_agent(*company,"q",invalid_json_args)["trace"][0]["success"]==false,"invalid tool argument JSON");
+    Json cut_response;cut_response["choices"]=Json::array({Json{{"finish_reason","length"},{"message",{{"role","assistant"},{"content","SELECT"}}}}});
+    bool incomplete=false;try{parse_completion(cut_response);}catch(...){incomplete=true;}check(incomplete,"incomplete API completion rejected");
     std::cout<<"Passed "<<checks<<" checks\n"; return 0;
  } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n';return 1; }
 }

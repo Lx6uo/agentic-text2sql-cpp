@@ -108,13 +108,20 @@ int Database::progress(void* context) {
 }
 Json Database::internal_query(const std::string& sql) {
     struct Guard { bool& flag; Guard(bool& f):flag(f){flag=true;} ~Guard(){flag=false;} } guard(internal_);
+    timed_out_=false;deadline_=Clock::now()+std::chrono::milliseconds(options_.timeout_ms);
+    sqlite3_progress_handler(db_,1000,progress,this);
+    struct ProgressGuard {sqlite3* db;~ProgressGuard(){sqlite3_progress_handler(db,0,nullptr,nullptr);}} progress_guard{db_};
     Statement stmt;
     if (sqlite3_prepare_v3(db_, sql.c_str(), -1, 0, &stmt.ptr, nullptr) != SQLITE_OK)
         throw std::runtime_error(sqlite3_errmsg(db_));
-    Json out = Json::array(); int status;
+    Json out = Json::array(); int status;size_t bytes=0;
     while ((status = sqlite3_step(stmt.ptr)) == SQLITE_ROW) {
+        if(cancelled)throw std::runtime_error("Schema read cancelled");
+        if(Clock::now()>=deadline_)throw std::runtime_error("Schema read timed out");
         Json row = Json::object();
         for (int c=0;c<sqlite3_column_count(stmt.ptr);++c) row[sqlite3_column_name(stmt.ptr,c)] = cell(stmt.ptr,c);
+        bytes+=row.dump(-1,' ',false,Json::error_handler_t::replace).size();
+        if(bytes>1048576)throw std::runtime_error("Schema exceeds 1 MB");
         out.push_back(std::move(row));
         if (out.size() > 10000) throw std::runtime_error("Schema exceeds 10000 entries");
     }
@@ -125,13 +132,15 @@ Json Database::list_tables() {
     return internal_query("SELECT name, type FROM sqlite_schema WHERE type IN ('table','view') AND name NOT GLOB 'sqlite_*' ORDER BY name");
 }
 Json Database::describe_tables(const std::vector<std::string>& names) {
-    auto tables = list_tables(); Json result = Json::array();
+    auto tables = list_tables(); Json result = Json::array();size_t bytes=0;
     for (const auto& name : names) {
         auto found = std::find_if(tables.begin(), tables.end(), [&](const Json& t){return t["name"]==name;});
         if (found == tables.end()) throw std::runtime_error("Unknown table: " + name);
         result.push_back(Json{{"name",name},{"type",(*found)["type"]},
             {"columns",internal_query("PRAGMA table_xinfo(" + quote(name) + ")")},
             {"foreign_keys",internal_query("PRAGMA foreign_key_list(" + quote(name) + ")")}});
+        bytes+=result.back().dump(-1,' ',false,Json::error_handler_t::replace).size();
+        if(bytes>1048576)throw std::runtime_error("Schema exceeds 1 MB; select fewer tables");
     }
     return result;
 }

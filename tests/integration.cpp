@@ -26,17 +26,24 @@ struct Sandbox {
     ~Sandbox(){std::error_code ec;fs::remove_all(dir,ec);}
 };
 struct Result {int code;std::string out,err;};
-Result run(const std::string& program,const std::vector<std::string>& args,const fs::path& dir,const std::string& input="",bool interrupt=false) {
+Result run(const std::string& program,const std::vector<std::string>& args,const fs::path& dir,const std::string& input="",bool interrupt=false,bool live_stdin=false) {
     static int sequence=0;auto stem=dir/("process-"+std::to_string(sequence++));
     {std::ofstream in(stem.string()+".in");in<<input;}
     posix_spawn_file_actions_t actions;posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_addopen(&actions,STDIN_FILENO,(stem.string()+".in").c_str(),O_RDONLY,0);
+    int stdin_pipe[2]={-1,-1};
+    if(live_stdin) {
+        if(pipe(stdin_pipe)!=0)throw std::runtime_error("stdin pipe");
+        posix_spawn_file_actions_adddup2(&actions,stdin_pipe[0],STDIN_FILENO);
+        posix_spawn_file_actions_addclose(&actions,stdin_pipe[0]);
+        posix_spawn_file_actions_addclose(&actions,stdin_pipe[1]);
+    }else posix_spawn_file_actions_addopen(&actions,STDIN_FILENO,(stem.string()+".in").c_str(),O_RDONLY,0);
     posix_spawn_file_actions_addopen(&actions,STDOUT_FILENO,(stem.string()+".out").c_str(),O_WRONLY|O_CREAT|O_TRUNC,0600);
     posix_spawn_file_actions_addopen(&actions,STDERR_FILENO,(stem.string()+".err").c_str(),O_WRONLY|O_CREAT|O_TRUNC,0600);
     std::vector<std::string> storage{program};storage.insert(storage.end(),args.begin(),args.end());
     std::vector<char*> argv;for(auto& s:storage)argv.push_back(s.data());argv.push_back(nullptr);
     pid_t pid=-1;int error=posix_spawn(&pid,program.c_str(),&actions,nullptr,argv.data(),environ);
     posix_spawn_file_actions_destroy(&actions);if(error)throw std::runtime_error("spawn CLI failed");
+    if(live_stdin)close(stdin_pipe[0]);
     int status=0;auto start=Clock::now();bool signalled=false;
     while(true) {
         auto waited=waitpid(pid,&status,WNOHANG);
@@ -46,6 +53,7 @@ Result run(const std::string& program,const std::vector<std::string>& args,const
         if(elapsed_ms(start)>12000){kill(pid,SIGKILL);waitpid(pid,&status,0);throw std::runtime_error("CLI hung");}
         poll(nullptr,0,10);
     }
+    if(live_stdin)close(stdin_pipe[1]);
     auto read=[](const std::string& p){std::ifstream f(p);return std::string((std::istreambuf_iterator<char>(f)),{});};
     return {WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status),read(stem.string()+".out"),read(stem.string()+".err")};
 }
@@ -84,22 +92,35 @@ int main(int argc,char** argv) {
         r=run(executable,{},box.dir,"/open \""+db.string()+"\"\n/tables\n/schema\n/model\n/verbose on\n/oops\n/exit\n");
         check(r.code==0&&r.out.find("Connected")!=std::string::npos&&r.out.find("Goodbye")!=std::string::npos&&r.err.find("Unknown command")!=std::string::npos,"REPL commands");
         r=run(executable,{},box.dir);check(r.code==0,"EOF");
+        r=run(executable,{},box.dir,"",true,true);check(r.code==130,"Ctrl+C at REPL prompt");
         r=run(executable,{"--json"},box.dir,"/open "+db.string()+"\n/tables\n/schema\n/exit\n");
         std::istringstream lines(r.out);std::string line;int count=0;while(std::getline(lines,line)){check(Json::parse(line).is_object(),"REPL JSON object");++count;}
         check(count==4&&r.code==0,"JSON REPL documents");
         // Environment overrides config; only fake values are used.
         {std::ofstream config(box.dir/"config.json");config<<Json{{"api",{{"api_key","wrong-config-key"}}}};}
         setenv("DEEPSEEK_API_KEY","fake-secret",1);setenv("T2S_FAKE_MODE","agent",1);
+        auto capture_file=(box.dir/"capture.json").string();setenv("T2S_CAPTURE_FILE",capture_file.c_str(),1);
+        auto cleaned=[&](){
+            auto saved=Json::parse(bytes(capture_file));
+            check(!fs::exists(saved["temporary_directory"].get<std::string>()),"HTTP temporary files cleaned");
+            errno=0;check(kill(saved["pid"].get<int>(),0)==-1&&errno==ESRCH,"HTTP child reaped");
+        };
         r=run(executable,{"query","--db",db.string(),"--question","count","--json","--verbose"},box.dir);j=one_json(r);
         check(r.code==0&&j["success"]&&j["sql_attempts"]==2&&j["usage"]["total_tokens"]==75&&j["query"]["rows"][0][0]==2,"API full roundtrip with repair");
         check(r.out.find("fake-secret")==std::string::npos&&r.err.find("fake-secret")==std::string::npos,"no key in logs");
+        cleaned();
         for(const auto& mode:{"http_error","bad_json","bad_envelope","transport","timeout","huge"}) {
             setenv("T2S_FAKE_MODE",mode,1);r=run(executable,{"query","--db",db.string(),"--question","count","--json"},box.dir);j=one_json(r);
             check(r.code==1&&j["termination"]=="api_error","API failure: "+std::string(mode));
             check(r.out.find("fake-secret")==std::string::npos,"error response redaction");
+            cleaned();
         }
         setenv("T2S_FAKE_MODE","sleep",1);r=run(executable,{"query","--db",db.string(),"--question","count","--json"},box.dir,"",true);
         check(r.code==130&&one_json(r)["termination"]=="cancelled","SIGINT cancels curl and agent");
+        cleaned();
+        {std::ofstream config(box.dir/"short-timeout.json");config<<Json{{"api",{{"timeout_seconds",1}}}};}
+        r=run(executable,{"query","--db",db.string(),"--question","count","--config",(box.dir/"short-timeout.json").string(),"--json"},box.dir);
+        check(r.code==1&&one_json(r)["error"].get<std::string>().find("timed out")!=std::string::npos,"parent HTTP deadline");cleaned();
         setenv("T2S_FAKE_MODE","agent",1);
         auto dataset=box.dir/"spider";auto directory=dataset/"database"/"fixture";fs::create_directories(directory);fs::copy_file(db,directory/"fixture.sqlite");
         Json examples=Json::array({Json{{"db_id","fixture"},{"question","Count employees"},{"query","SELECT COUNT(*) FROM employees"}},
@@ -124,7 +145,7 @@ int main(int argc,char** argv) {
         Json traversal=Json::array({Json{{"db_id","../outside"},{"question","count"},{"query","SELECT 1"}}});
         {std::ofstream dev(dataset/"dev.json");dev<<traversal;}
         r=run(executable,{"benchmark","--dataset",dataset.string(),"--output",(box.dir/"traversal.jsonl").string(),"--json"},box.dir);
-        j=one_json(r);check(j["modes"]["agentic"]["execution_successes"]==0,"db_id traversal rejected");
+        j=one_json(r);check(r.code==1&&j["modes"]["agentic"]["execution_successes"]==0&&j["modes"]["agentic"]["case_errors"]==1,"db_id traversal rejected");
         check(bytes(db)==before&&bytes(directory/"fixture.sqlite")==before,"all source databases unchanged");
         {std::ofstream config(box.dir/"bad-config.json");config<<"{\"api\":{\"api_key\":\"fake-secret\",\"timeout_seconds\":0}}";}
         r=run(executable,{"demo","--config",(box.dir/"bad-config.json").string(),"--json"},box.dir);check(r.code==2&&r.out.find("fake-secret")==std::string::npos,"config bounds and redaction");

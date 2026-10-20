@@ -19,6 +19,9 @@ int main(int argc,char** argv) {
         if(auth.empty()||stat(auth.c_str(),&st)!=0||(st.st_mode&0777)!=0600||std::getenv("DEEPSEEK_API_KEY"))return 92;
         auto dir=auth.substr(0,auth.rfind('/'));
         if(stat(dir.c_str(),&st)!=0||(st.st_mode&0777)!=0700)return 93;
+        if(const char* capture=std::getenv("T2S_CAPTURE_FILE")) {
+            std::ofstream saved(capture);saved<<Json{{"temporary_directory",dir},{"pid",getpid()}};
+        }
         std::ifstream auth_in(auth);std::string content((std::istreambuf_iterator<char>(auth_in)),{});
         if(content.find("Authorization: Bearer fake-secret")==std::string::npos)return 94;
         std::ifstream in(body);Json request;in>>request;

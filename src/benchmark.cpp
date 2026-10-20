@@ -137,7 +137,7 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
         {"comparison","Positional columns; duplicate-preserving rows; outer ORDER BY preserves row order; numeric relative tolerance 1e-9. Truncated results are not comparable."},
         {"agent_limits",{{"max_steps",config.agent.max_steps},{"max_sql_attempts",config.agent.max_sql_attempts},{"max_repairs",config.agent.max_repairs}}}};
     records.write(metadata.dump()+"\n");
-    struct Stats {int n=0,execution=0,matches=0,comparable=0,completed=0;double steps=0,attempts=0,time=0;Json tokens=Json::object();};
+    struct Stats {int n=0,execution=0,matches=0,comparable=0,completed=0,errors=0;double steps=0,attempts=0,time=0;Json tokens=Json::object();};
     std::map<std::string,Stats> stats;
     std::string abort_reason;
     for(size_t i=0;i<count&&!cancelled&&abort_reason.empty();++i) {
@@ -175,7 +175,7 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
                     record["predicted_rows"]=predicted["rows"].size();record["reference_rows"]=gold["rows"].size();
                     if(comparable) {++s.comparable;bool match=equivalent_results(predicted,gold,has_outer_order_by(example["query"].get<std::string>()));record["result_match"]=match;if(match)++s.matches;}
                 }
-            }catch(const std::exception& e){record["error"]=e.what();}
+            }catch(const std::exception& e){record["error"]=e.what();++s.errors;}
             records.write(record.dump(-1,' ',false,Json::error_handler_t::replace)+"\n");
             auto sql=record["predicted_sql"].get<std::string>();for(char& c:sql)if(c=='\n'||c=='\r'||c=='\t')c=' ';
             predictions[mode]->write(sql+"\t"+id+"\n");
@@ -187,9 +187,10 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
         {"metric",metadata["metric"]},{"modes",Json::object()}};
     for(const auto& mode:modes) {
         const auto& s=stats[mode];double n=s.n?s.n:1;
-        summary["modes"][mode]={{"cases",s.n},{"execution_successes",s.execution},{"result_matches",s.matches},{"comparable_cases",s.comparable},
+        summary["modes"][mode]={{"cases",s.n},{"case_errors",s.errors},{"execution_successes",s.execution},{"result_matches",s.matches},{"comparable_cases",s.comparable},
             {"execution_success_rate",s.execution/n},{"local_result_agreement_rate",s.matches/n},{"agent_completion_rate",s.completed/n},
             {"average_steps",s.steps/n},{"average_sql_attempts",s.attempts/n},{"average_elapsed_ms",s.time/n},{"token_usage",s.tokens}};
+        if(s.errors>0)summary["success"]=false;
     }
     records.write(summary.dump()+"\n");return summary;
 }

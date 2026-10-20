@@ -20,7 +20,7 @@
 
 Schema 内部查询短暂放行 authorizer，输入仅来自程序固定查询和经过表名单验证的引用标识符；这个路径不接受模型 SQL。公开执行工具不能获得内部权限。
 
-progress handler 每 1000 条 VM 指令检查 SIGINT 和单查询截止时间，准备及读取完成后也检查截止时间。配置 busy timeout；限制 SQL 16 KB、单值 1 MB、列数 128、表达式深度 100、联合 SELECT 20、VM 指令分配 250000。默认本地结果序列化上限 1 MB，超出返回 `truncated=true`。超时和取消清空不完整行，返回失败。该机制是 SQLite 级防护，不是独立操作系统沙箱；极端恶意或损坏数据库仍受进程和 SQLite 本身边界影响。
+progress handler 每 1000 条 VM 指令检查 SIGINT 和单查询截止时间，准备及读取完成后也检查截止时间。Schema 内部读取同样受截止时间、最多 10000 条和 1 MB 约束。配置 busy timeout；限制 SQL 16 KB、单值 1 MB、列数 128、表达式深度 100、联合 SELECT 20、VM 指令分配 250000。默认本地结果序列化上限 1 MB，超出返回 `truncated=true`。超时和取消清空不完整行，返回失败。该机制是 SQLite 级防护，不是独立操作系统沙箱；极端恶意或损坏数据库仍受进程和 SQLite 本身边界影响。
 
 ## HTTP 与密钥
 
@@ -40,4 +40,4 @@ Baseline 把完整 Schema 和问题发送一次，不使用工具、不修正。
 
 比较列位置和数量，忽略列别名；标准 SQL 有外层 `ORDER BY` 时比较行顺序，否则排序比较保留重复次数。数字使用相对容差 `1e-9`，字符串与数字不同，NULL 只等于 NULL。空结果可能造成偶然一致；某些等价 SQL 会因列顺序而被判不同；浮点容差不代表任意 SQL 语义等价。这个指标仅是本地结果一致率，不是官方 Test Suite Accuracy。
 
-JSONL 保存 metadata、逐题 case 和 summary。summary 的率以各模式实际尝试题数为分母，另列可比较数和请求题数。取消或 API 失败会产生部分结果；必须核对 `cases` 和 `requested_cases_per_mode`。预测导出为每行 `SQL\tdb_id`，API 提前停止的文件只包含已尝试题目，应按 case index 对齐官方 gold。
+JSONL 保存 metadata、逐题 case 和 summary。summary 的率以各模式实际尝试题数为分母，另列可比较数和请求题数。取消或 API 失败会产生部分结果；必须核对 `cases` 和 `requested_cases_per_mode`。数据文件、路径或数据库等题级错误记录 `case_errors` 并使最终退出码为 1；有效运行中答案不一致仅影响指标。预测导出为每行 `SQL\tdb_id`，API 提前停止的文件只包含已尝试题目，应按 case index 对齐官方 gold。
