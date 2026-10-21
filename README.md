@@ -4,6 +4,8 @@
 
 支持标准输入 REPL、一次性查询、Schema 查看、verbose 和 JSON 输出；提供真正执行 SQLite 的离线 Mock Demo，以及 Spider 1.0 Baseline/Agentic 对照评价。
 
+需要用于课程展示、技术答辩或制作 PPT 时，可直接阅读[完整项目汇报文稿](docs/project-report.md)。文稿包含背景、架构、安全、实验、限制、路线图、16 页 PPT 大纲和答辩问答。
+
 ## 构建与测试
 
 需要 C++20 编译器、CMake ≥ 3.20 和 libcurl ≥ 7.68 的开发包。支持 macOS、Linux 和原生 Windows/MSVC；真实 API 通过 libcurl，不需要系统 `curl` 命令。无需 Python、Node.js、Docker。SQLite 和 JSON 的固定版本源码已包含，CMake 不在线下载依赖。
