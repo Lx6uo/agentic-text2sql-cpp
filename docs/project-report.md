@@ -148,21 +148,25 @@ Agent steps: 4, SQL attempts: 1, repairs: 0
 
 > 真实模型生成的 SQL、措辞和耗时可能略有变化；数据库结果应一致。
 
-## 7. 📊 验证结果
+## 7. 📊 Spider 数据集性能
 
-| 验证项 | 结果 |
-|---|---:|
-| Release CTest | ✅ 5 / 5 |
-| ASan / UBSan | ✅ 5 / 5 |
-| 核心功能检查 | ✅ 72 项 |
-| 跨平台 Benchmark 检查 | ✅ 21 项 |
-| GitHub Actions | ✅ Windows / macOS / Linux |
-| 真实 DeepSeek Tool Calling | ✅ 通过 |
-| 官方 Spider 小样本 | ✅ 两种模式均 3 / 3 结果一致 |
+官方 Spider 1.0 dev 小样本：**3 个问题，`concert_singer` 数据库**。
 
-CI 证据：https://github.com/Lx6uo/agentic-text2sql-cpp/actions/runs/39551815336
+| 指标 | Baseline | Agentic |
+|---|---:|---:|
+| SQL 执行成功率 | 100%（3 / 3） | 100%（3 / 3） |
+| 本地结果一致率 | 100%（3 / 3） | 100%（3 / 3） |
+| 平均 Agent 步数 | 1.0 | 4.0 |
+| 平均 SQL 尝试 | 1.0 | 1.0 |
+| 平均耗时 | 1.05 s | 4.00 s |
+| 总 Token | 3,038 | 11,041 |
+| 平均 Token / 题 | 约 1,013 | 约 3,680 |
 
-⚠️ Spider 的 3 题只用于证明链路打通，**不能作为完整准确率**；本地结果一致率也不等于官方 Test Suite Accuracy。
+**结果解读：**
+
+- Agentic 完成真实的“列出表 → 查看字段 → 执行 SQL”流程。
+- 当前简单样本中，两种模式结果相同；Agentic 以更多步骤、耗时和 token 换取动态探索与错误修正能力。
+- 3 题只证明端到端链路可用，**不代表完整 Spider 准确率**；本地结果一致率也不等于官方 Test Suite Accuracy。
 
 ## 8. ✨ 项目亮点
 
@@ -171,17 +175,23 @@ CI 证据：https://github.com/Lx6uo/agentic-text2sql-cpp/actions/runs/395518153
 - **跨数据库**：不写死 Demo 字段。
 - **轻量工程**：无 LangChain、无 Web 服务、无多 Agent。
 - **可离线演示**：Mock 模型 + 真实 SQLite。
-- **跨平台实测**：Windows / macOS / Linux CI 全绿。
+- **跨平台支持**：Windows / macOS / Linux。
 
-## 9. ⚠️ 限制与下一步
+## 9. 🚀 改进方向
 
-| 当前限制 | 下一步 |
-|---|---|
-| REPL 问题之间无上下文 | 短期历史、`/clear`、切库自动清理 |
-| Spider 实测规模小 | 分层 30～50 题，再跑完整 dev |
-| Benchmark 不能续跑 | `--resume`、按数据库 / 难度筛选 |
-| API 错误立即停止 | 429 / 5xx 有限退避重试 |
-| 本地结果一致率有限 | 接入官方 Test Suite Accuracy |
+| 方向 | 计划能力 | 使用价值 |
+|---|---|---|
+| 🧠 多轮上下文 | `/context on/off`、`/clear`、最近若干轮历史 | 支持“继续”“再筛选”等追问 |
+| 🔄 上下文切换 | `/open` 切库自动清理；上下文长度上限 | 避免旧 Schema 污染和 token 无限增长 |
+| 📈 结果分析 | 统计摘要、分布、排名、异常值、分组比较 | 查询后直接获得数据洞察 |
+| 📤 分析输出 | 文本 / JSON；预留图表与 CSV 导出 | 便于汇报和后续程序集成 |
+
+数据分析交互示例：
+
+```text
+> 查询每个部门的平均工资
+> 分析刚才结果，指出最高值、差距和异常项
+```
 
 ## 10. 🎞️ PPT 建议：8 页
 
@@ -193,8 +203,8 @@ CI 证据：https://github.com/Lx6uo/agentic-text2sql-cpp/actions/runs/395518153
 | 4 | Agentic 流程 | 探索、执行、报错、修正时间线 |
 | 5 | 安全设计 | 多层只读盾牌图 |
 | 6 | 运行演示 | 本文第 6 节输入输出 |
-| 7 | 测试与实验 | 72 + 21 检查、三平台 CI、Spider 小样本 |
-| 8 | 亮点与路线图 | 安全解耦、跨库、上下文与规模化评测 |
+| 7 | 数据集性能 | Baseline / Agentic 指标表与代价分析 |
+| 8 | 亮点与改进 | 安全解耦、上下文切换、结果分析、总结 |
 
 ## 11. ✅ 总结
 
