@@ -48,6 +48,8 @@ int main() {
     check(run_agent(*company,"bad",malformed)["termination"]=="api_error","malformed API envelope");
     ApiOptions empty;
     check(run_agent(*company,"q",deepseek(empty))["error"].get<std::string>().find("Missing API key")!=std::string::npos,"missing API key");
+    ApiOptions insecure;insecure.api_key="fake-key";insecure.base_url="http://api.example.com";
+    bool insecure_rejected=false;try{curl_post(insecure,Json::object());}catch(...){insecure_rejected=true;}check(insecure_rejected,"non-HTTPS API rejected");
     bool bad_json=false;try{parse_completion_text("not json");}catch(...){bad_json=true;}check(bad_json,"bad JSON");
     auto body=request_body(empty,Json::array(),agent_tools());
     check(body["stream"]==false&&body["thinking"]["type"]=="disabled"&&body["tool_choice"]=="auto","request API parameters");

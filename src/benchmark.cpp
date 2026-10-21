@@ -1,7 +1,6 @@
 #include "benchmark.h"
 #include <algorithm>
 #include <cmath>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -9,27 +8,23 @@
 #include <numeric>
 #include <set>
 #include <stdexcept>
-#include <unistd.h>
 
 namespace t2s {
 namespace fs=std::filesystem;
 namespace {
 class Output {
-    int fd_=-1;
+    std::ofstream stream_;
 public:
     explicit Output(const fs::path& path) {
         if(!path.parent_path().empty())fs::create_directories(path.parent_path());
-        fd_=open(path.c_str(),O_WRONLY|O_CREAT|O_EXCL,0600);
-        if(fd_<0)throw std::runtime_error("Cannot create output (existing files are preserved): "+path.string());
+        if(fs::exists(path))throw std::runtime_error("Cannot create output (existing files are preserved): "+path_to_utf8(path));
+        stream_.open(path,std::ios::out|std::ios::binary);
+        if(!stream_)throw std::runtime_error("Cannot create output: "+path_to_utf8(path));
     }
-    ~Output(){if(fd_>=0)close(fd_);}
     void write(const std::string& s) {
-        size_t n=0;while(n<s.size()) {
-            auto wrote=::write(fd_,s.data()+n,s.size()-n);
-            if(wrote<0&&errno==EINTR)continue;
-            if(wrote<=0)throw std::runtime_error("Benchmark output write failed");
-            n+=static_cast<size_t>(wrote);
-        }
+        stream_.write(s.data(),static_cast<std::streamsize>(s.size()));
+        stream_.flush();
+        if(!stream_)throw std::runtime_error("Benchmark output write failed");
     }
 };
 bool cell_equal(const Json& a,const Json& b) {
@@ -104,10 +99,10 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
     if(o.limit<1)throw std::runtime_error("Benchmark limit must be positive");
     if(o.mode!="baseline"&&o.mode!="agentic"&&o.mode!="both")throw std::runtime_error("Invalid benchmark mode");
     if(o.split!="dev"&&o.split!="train"&&o.split!="train_spider"&&o.split!="train_others")throw std::runtime_error("Unsupported split: use dev, train_spider or train_others");
-    auto root=fs::canonical(o.dataset);
+    auto root=fs::canonical(path_from_utf8(o.dataset));
     std::string split=o.split=="train"?"train_spider":o.split;
     auto file=root/(split+".json");
-    if(!fs::exists(file))throw std::runtime_error("Spider questions not found: "+file.string());
+    if(!fs::exists(file))throw std::runtime_error("Spider questions not found: "+path_to_utf8(file));
     if(!contained(fs::canonical(file),root))throw std::runtime_error("Spider question file escapes dataset directory");
     if(fs::file_size(file)>64*1024*1024)throw std::runtime_error("Spider question file exceeds 64 MB");
     std::ifstream in(file);Json examples;
@@ -122,15 +117,15 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
             throw std::runtime_error("Spider item missing db_id, question or query at index "+std::to_string(i));
     }
     auto stamp=std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-    fs::path output=o.output.empty()?fs::path("results")/("spider-"+stamp+".jsonl"):fs::path(o.output);
-    fs::path pred_base=o.predictions.empty()?fs::path(output.string()+".sql"):fs::path(o.predictions);
+    fs::path output=o.output.empty()?fs::path("results")/("spider-"+stamp+".jsonl"):path_from_utf8(o.output);
+    fs::path pred_base=o.predictions.empty()?path_from_utf8(path_to_utf8(output)+".sql"):path_from_utf8(o.predictions);
     std::vector<std::string> modes=o.mode=="both"?std::vector<std::string>{"baseline","agentic"}:std::vector<std::string>{o.mode};
     std::map<std::string,std::unique_ptr<Output>> predictions;
     Json paths=Json::object();
     Output records(output);
     for(auto& mode:modes) {
-        auto path=modes.size()==1?pred_base:fs::path(pred_base.string()+"."+mode+".sql");
-        predictions[mode]=std::make_unique<Output>(path);paths[mode]=path.string();
+        auto path=modes.size()==1?pred_base:path_from_utf8(path_to_utf8(pred_base)+"."+mode+".sql");
+        predictions[mode]=std::make_unique<Output>(path);paths[mode]=path_to_utf8(path);
     }
     Json metadata{{"type","metadata"},{"dataset","Spider 1.0"},{"split",split},{"model",config.api.model},
         {"requested",count},{"metric","Local execution-result agreement; not official Test Suite Accuracy"},
@@ -149,7 +144,7 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
                 {"reference_sql",example["query"]},{"predicted_sql",""},{"execution_success",false},{"result_match",nullptr}};
             try {
                 auto path=database_path(root,id);
-                Database db(path.string(),config.database);
+                Database db(path_to_utf8(path),config.database);
                 // The reference SQL is never passed to complete / agent.
                 auto run=mode=="baseline"?run_baseline(db,question,complete,o.verbose):run_agent(db,question,complete,config.agent,o.verbose);
                 record["agent"]=run; s.steps+=run["agent_steps"].get<int>();s.attempts+=run["sql_attempts"].get<int>();s.time+=run["elapsed_ms"].get<double>();
@@ -163,9 +158,9 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
                     if(query["success"].get<bool>())++s.execution;
                 }
                 DatabaseOptions evaluation=config.database; evaluation.max_display_rows=100000;evaluation.max_result_bytes=16*1024*1024;
-                Database evaluate(path.string(),evaluation);
+                Database evaluate(path_to_utf8(path),evaluation);
                 DatabaseOptions reference_options=evaluation;reference_options.reference_double_quoted_strings=true;
-                Database reference(path.string(),reference_options);
+                Database reference(path_to_utf8(path),reference_options);
                 auto gold=reference.execute(example["query"].get<std::string>());
                 record["reference_success"]=gold["success"];record["reference_error"]=gold["error"];record["reference_truncated"]=gold["truncated"];
                 if(!query.is_null()&&query["success"].get<bool>()&&gold["success"].get<bool>()) {
@@ -183,7 +178,7 @@ Json run_benchmark(const BenchmarkOptions& o,const Config& config,Completion com
             if(!abort_reason.empty())break;
         }
     }
-    Json summary{{"type","summary"},{"success",!cancelled&&abort_reason.empty()},{"cancelled",cancelled!=0},{"requested_cases_per_mode",count},{"error",abort_reason.empty()?Json(nullptr):Json(abort_reason)},{"output",output.string()},{"predictions",paths},
+    Json summary{{"type","summary"},{"success",!cancelled&&abort_reason.empty()},{"cancelled",cancelled!=0},{"requested_cases_per_mode",count},{"error",abort_reason.empty()?Json(nullptr):Json(abort_reason)},{"output",path_to_utf8(output)},{"predictions",paths},
         {"metric",metadata["metric"]},{"modes",Json::object()}};
     for(const auto& mode:modes) {
         const auto& s=stats[mode];double n=s.n?s.n:1;

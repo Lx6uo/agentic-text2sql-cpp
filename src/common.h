@@ -2,6 +2,7 @@
 #include <csignal>
 #include <json.hpp>
 #include <chrono>
+#include <filesystem>
 #include <string>
 
 namespace t2s {
@@ -14,5 +15,12 @@ inline double elapsed_ms(Clock::time_point start) {
 inline std::string trim(std::string s) {
     auto first = s.find_first_not_of(" \t\r\n");
     return first == std::string::npos ? "" : s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+}
+inline std::filesystem::path path_from_utf8(const std::string& value) {
+    return std::filesystem::path(std::u8string(value.begin(),value.end()));
+}
+inline std::string path_to_utf8(const std::filesystem::path& path) {
+    auto value=path.u8string();
+    return std::string(value.begin(),value.end());
 }
 }

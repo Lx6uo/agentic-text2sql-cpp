@@ -24,9 +24,11 @@ progress handler 每 1000 条 VM 指令检查 SIGINT 和单查询截止时间，
 
 ## HTTP 与密钥
 
-使用 POSIX `posix_spawnp` 调用系统 curl，不调用 shell。传递参数数组，不解析用户字符串为命令。认证头和请求体写入随机 0700 临时目录内的 0600 文件，命令行只含文件路径；curl 子进程环境移除 `DEEPSEEK_API_KEY`。退出时清理文件、关闭管道并回收子进程。
+使用 libcurl easy API 在进程内请求，不调用 shell，也不创建网络子进程。请求体和认证头只存在于内存；API Key 不进入命令行、临时文件或日志。CMake 通过 `CURL::libcurl` 链接系统/包管理器提供的 libcurl，Windows 推荐 vcpkg 静态 triplet。
 
-`curl -q` 禁用自动读取 `.curlrc`，`--globoff` 禁用 URL 展开，仅允许 HTTPS，不跟随重定向。通过连接/请求超时、父进程截止时间和最多 2 MB 响应限制防止无限等待或读取。只接受 2xx，错误响应正文不进入日志。SIGINT 终止等待并回收 curl。API body 包含 `stream=false`、`thinking.type=disabled` 和有工具时的 `tool_choice=auto`。不输出或要求完整思维链。
+libcurl 仅允许 HTTPS，不跟随重定向，启用证书链与主机名校验。连接/总请求超时、Content-Length 和写回调共同限制响应；写回调按解压后的数据强制最多 2 MB。只接受 2xx，错误响应正文不进入日志。progress callback 检查 SIGINT 并取消请求。API body 包含 `stream=false`、`thinking.type=disabled` 和有工具时的 `tool_choice=auto`。不输出或要求完整思维链。
+
+Windows 使用 `CommandLineToArgvW` 获取原生 UTF-16 参数，再严格转换为 UTF-8；SQLite 接收 UTF-8 文件名，文件流使用 `std::filesystem::path`。Ctrl+C 使用标准 `std::signal`，终端检测分别使用 `_isatty` 和 POSIX `isatty`。Benchmark 输出使用跨平台 `std::ofstream`，已存在的结果仍拒绝覆盖。
 
 配置环境变量优先于文件，空环境变量也覆盖文件值。配置解析失败不复述可能含密钥的 JSON 内容。示例密钥为空，实际配置和数据库不提交。
 

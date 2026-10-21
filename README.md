@@ -6,10 +6,10 @@
 
 ## 构建与测试
 
-需要 C++20 编译器、CMake ≥ 3.20。支持 macOS/Linux 的 POSIX 环境，真实 API 模式另需系统 `curl`（支持 `--header @file`）。无需 Python、Node.js、Docker。SQLite 和 JSON 的固定版本源码已包含，构建不联网。
+需要 C++20 编译器、CMake ≥ 3.20 和 libcurl ≥ 7.68 的开发包。支持 macOS、Linux 和原生 Windows/MSVC；真实 API 通过 libcurl，不需要系统 `curl` 命令。无需 Python、Node.js、Docker。SQLite 和 JSON 的固定版本源码已包含，CMake 不在线下载依赖。
 
 ```bash
-# macOS 缺少 CMake 时：brew install cmake
+# macOS 的 Xcode Command Line Tools 自带 libcurl；缺少 CMake 时：brew install cmake
 cmake -S . -B build
 cmake --build build -j 4
 ctest --test-dir build --output-on-failure
@@ -17,6 +17,28 @@ ctest --test-dir build --output-on-failure
 ./build/text2sql demo
 ./build/text2sql demo --repair --verbose
 ```
+
+Ubuntu/Debian 先安装：
+
+```bash
+sudo apt-get install cmake g++ libcurl4-openssl-dev
+```
+
+Windows 推荐在 “Developer PowerShell for VS 2022” 中使用 vcpkg 静态库，避免运行时遗漏 DLL：
+
+```powershell
+$VCPKG_ROOT = "C:\src\vcpkg"
+& "$VCPKG_ROOT\vcpkg.exe" install curl:x64-windows-static
+
+cmake -S . -B build -A x64 `
+  "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
+.\build\Release\text2sql.exe demo --repair --json
+```
+
+Windows 入口直接读取 UTF-16 命令行并转换为 UTF-8，控制台设为 UTF-8；中文配置、数据库、数据集和结果路径会按 UTF-8 传入 SQLite 和 `std::filesystem`。
 
 `demo` 明确标记 `Demo Mode (Mock LLM)`，通过 `examples/demo.sql` 内置内存数据库。正常演示使用工具探索 Schema 后执行 JOIN 聚合；`--repair` 先执行不存在的 `department_name` 字段，收到错误后改用真实字段。预设的是模型消息，表结构、错误与结果由 SQLite 实时产生：Engineering 115000、Finance 95000、Marketing 82500。
 
@@ -131,7 +153,7 @@ SQLite 文件只读打开，使用 prepare_v3、stmt_readonly、authorizer、pro
 
 默认只发送问题、Schema 和有限工具预览，不上传数据库文件。数据库内容属于不可信数据，提示不允许覆盖系统指令；执行权限始终由 SQLite 强制限制。真实查询会发送工具选中记录的预览，请只查询可以发送给所配置 API 的数据。
 
-curl 使用 POSIX 参数数组，无 shell 拼接；认证头放在私有临时文件，传入文件路径，限制 HTTPS、响应大小、请求时间并清理资源。API 错误正文不进入日志。
+libcurl 在当前进程内发送 HTTPS，请求不经过 shell 或子进程。API Key 仅进入内存中的认证头，不写临时文件或命令行；禁用重定向，强制 TLS 证书和主机名校验，并限制连接时间、总时间和解压后的响应大小。API 错误正文不进入日志。
 
 ## 目录与依赖
 
@@ -148,17 +170,18 @@ curl 使用 POSIX 参数数组，无 shell 拼接；认证头放在私有临时�
 │   ├── json/json.hpp, LICENSE.MIT
 │   └── README.md, SHA256SUMS
 ├── examples/demo.sql
-├── tests/tests.cpp, integration.cpp, fake_curl.cpp
+├── tests/tests.cpp, benchmark_tests.cpp, cli_tests.cmake
+├── .github/workflows/ci.yml
 ├── docs/design.md, validation.md
 ├── data/.gitkeep
 └── results/.gitkeep
 ```
 
-项目 MIT；SQLite 3.50.4 为公有领域；nlohmann/json 3.12.0 为 MIT。版本、来源和 SHA-256 校验值见 `third_party/`。只有 C++、SQLite、单头 JSON 及真实 API 的系统 curl，无 AI 框架和 UI 依赖。
+项目 MIT；SQLite 3.50.4 为公有领域；nlohmann/json 3.12.0 为 MIT；libcurl 使用 curl license。版本、来源和 SHA-256 校验值见 `third_party/`。没有 AI 框架和 UI 依赖。
 
 ## 验证与限制
 
-CTest 覆盖真实 SQLite 安全/查询行为、Mock Agent 修正和停止条件；集成测试用测试专用 curl 替身覆盖 CLI、认证文件权限、密钥不进入参数或子进程环境、HTTP/格式/超时/响应大小/取消错误，以及 Spider 格式 fixture 的两种模式和导出。测试替身只在测试过程中置入 PATH，产品使用系统 curl。
+CTest 覆盖真实 SQLite 安全/查询行为、Mock Agent 修正和停止条件、HTTPS URL 强制、CLI 帮助和 Demo，以及带中文路径的 Spider 格式 fixture、Baseline/Agentic 对照和导出。GitHub Actions 配置了 Ubuntu、macOS 和 Windows/MSVC 三个平台；CI 不读取真实 API Key。
 
 ```bash
 cmake -S . -B build-sanitize -DTEXT2SQL_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
@@ -166,6 +189,6 @@ cmake --build build-sanitize -j 4
 ctest --test-dir build-sanitize --output-on-failure
 ```
 
-当前机器的实际验证结果见 [验证记录](docs/validation.md)。未提供 DeepSeek API Key，未执行真实付费 API 查询；未提供官方 Spider 数据包，未报告真实 Spider/模型准确率。已验证 API 请求协议和 Spider 格式完整流水线，联网模型效果仍需要使用自己的 Key 和官方数据实测。
+当前机器的实际验证结果见 [验证记录](docs/validation.md)。libcurl 网络层已完成真实 DeepSeek Tool Calling；官方 Spider dev 前 3 题已跑 Baseline/Agentic 小规模验证。3 题全部来自同一数据库，只证明链路正确，不代表完整 dev 准确率，也不是官方 Test Suite Accuracy。
 
-当前支持 macOS/Linux，未实现 Windows 原生子进程适配。不支持写数据库、TUI、流式输出、模型训练或官方测试集排行榜提交。SQL 函数白名单、资源上限和严格双引号规则可能拒绝部分合法但超出当前范围的查询。SQLite 防护是进程内机制，极端恶意数据库不等价于被隔离在 OS 沙箱内。终端对齐只做轻量 UTF-8 处理。
+当前 macOS 已实际验证；Linux 和 Windows 构建由 CI 定义覆盖，本机没有 Windows 环境，需以首次远程 CI 结果作为 MSVC 的最终证据。不支持写数据库、TUI、流式输出、模型训练或官方测试集排行榜提交。SQL 函数白名单、资源上限和严格双引号规则可能拒绝部分合法但超出当前范围的查询。SQLite 防护是进程内机制，极端恶意数据库不等价于被隔离在 OS 沙箱内。终端对齐只做轻量 UTF-8 处理。

@@ -20,9 +20,10 @@ void string_value(const Json& j,const char* name,std::string& dest) {
 }
 Config load_config(const std::string& path,bool required) {
     Config c;
-    if(std::filesystem::exists(path)) {
-        if(std::filesystem::file_size(path)>65536) throw std::runtime_error("Config file exceeds 64 KB");
-        std::ifstream in(path);
+    auto native_path=path_from_utf8(path);
+    if(std::filesystem::exists(native_path)) {
+        if(std::filesystem::file_size(native_path)>65536) throw std::runtime_error("Config file exceeds 64 KB");
+        std::ifstream in(native_path);
         if(!in) throw std::runtime_error("Cannot read config file");
         Json j; try{in>>j;}catch(...){throw std::runtime_error("Invalid config JSON");}
         if(!j.is_object()) throw std::runtime_error("Config must be a JSON object");

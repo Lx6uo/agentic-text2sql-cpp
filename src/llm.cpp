@@ -1,43 +1,53 @@
 #include "llm.h"
 #include <algorithm>
-#include <cerrno>
 #include <cstring>
-#include <fcntl.h>
-#include <fstream>
-#include <poll.h>
-#include <signal.h>
+#include <curl/curl.h>
 #include <set>
-#include <spawn.h>
 #include <stdexcept>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-extern char** environ;
 
 namespace t2s {
 namespace {
 constexpr size_t response_limit=2*1024*1024;
-struct Temp {
-    std::string directory;
-    Temp() {
-        char pattern[]="/tmp/text2sql-http-XXXXXX";
-        char* p=mkdtemp(pattern);if(!p) throw std::runtime_error("Cannot create HTTP temporary directory");
-        directory=p;
+struct CurlGlobal {
+    CurlGlobal() {
+        if(curl_global_init(CURL_GLOBAL_DEFAULT)!=CURLE_OK)
+            throw std::runtime_error("Cannot initialize libcurl");
     }
-    ~Temp() { unlink((directory+"/body").c_str());unlink((directory+"/auth").c_str());rmdir(directory.c_str()); }
-    std::string write(const char* name,const std::string& text) {
-        auto path=directory+"/"+name;
-        int fd=open(path.c_str(),O_CREAT|O_EXCL|O_WRONLY,0600);
-        if(fd<0) throw std::runtime_error("Cannot create HTTP temporary file");
-        size_t offset=0;
-        while(offset<text.size()) {
-            auto n=::write(fd,text.data()+offset,text.size()-offset);
-            if(n<0&&errno==EINTR)continue;
-            if(n<=0){close(fd);throw std::runtime_error("Cannot write HTTP temporary file");}
-            offset+=static_cast<size_t>(n);
-        }
-        close(fd);return path;
+    ~CurlGlobal(){curl_global_cleanup();}
+};
+struct CurlHandle {
+    CURL* value=curl_easy_init();
+    CurlHandle(){if(!value)throw std::runtime_error("Cannot create libcurl handle");}
+    ~CurlHandle(){curl_easy_cleanup(value);}
+};
+struct CurlHeaders {
+    curl_slist* value=nullptr;
+    ~CurlHeaders(){curl_slist_free_all(value);}
+    void append(const std::string& header) {
+        auto* next=curl_slist_append(value,header.c_str());
+        if(!next)throw std::runtime_error("Cannot allocate HTTP headers");
+        value=next;
     }
+};
+struct ResponseBuffer {
+    std::string data;
+    bool too_large=false;
+};
+size_t receive(char* data,size_t size,size_t count,void* context) noexcept {
+    auto& response=*static_cast<ResponseBuffer*>(context);
+    if(size!=0&&count>static_cast<size_t>(-1)/size){response.too_large=true;return 0;}
+    size_t bytes=size*count;
+    if(bytes>response_limit-response.data.size()){response.too_large=true;return 0;}
+    try{response.data.append(data,bytes);}catch(...){return 0;}
+    return bytes;
+}
+int progress(void*,curl_off_t,curl_off_t,curl_off_t,curl_off_t) noexcept {
+    return cancelled?1:0;
+}
+template<typename T>
+void option(CURL* handle,CURLoption key,T value) {
+    if(curl_easy_setopt(handle,key,value)!=CURLE_OK)
+        throw std::runtime_error("Cannot configure libcurl request");
 };
 void validate(const ApiOptions& api) {
     // HTTPS only; redirects and curl configuration discovery are disabled.
@@ -51,10 +61,6 @@ void validate(const ApiOptions& api) {
         throw std::runtime_error("Invalid API key format");
     if(api.timeout_seconds<1||api.timeout_seconds>600)throw std::runtime_error("Invalid API timeout");
 }
-struct Child {
-    pid_t pid=-1; int fd=-1; bool reaped=false;
-    ~Child(){if(fd>=0)close(fd);if(pid>0&&!reaped){kill(pid,SIGKILL);while(waitpid(pid,nullptr,0)<0&&errno==EINTR){}}}
-};
 }
 Json request_body(const ApiOptions& api,const Json& messages,const Json& tools) {
     Json body{{"model",api.model},{"messages",messages},{"stream",false},{"thinking",{{"type","disabled"}}},{"max_tokens",api.max_tokens}};
@@ -98,59 +104,53 @@ Json parse_completion_text(const std::string& text) {
 }
 Json curl_post(const ApiOptions& api,const Json& body) {
     validate(api);if(cancelled)throw std::runtime_error("API request cancelled");
-    Temp temp;
-    auto request=temp.write("body",body.dump(-1,' ',false,Json::error_handler_t::replace));
-    auto auth=temp.write("auth","Authorization: Bearer "+api.api_key+"\nContent-Type: application/json\n");
+    static CurlGlobal global;
+    CurlHandle handle;CurlHeaders headers;ResponseBuffer response;
+    auto request=body.dump(-1,' ',false,Json::error_handler_t::replace);
+    std::string authorization="Authorization: Bearer "+api.api_key;
+    headers.append(authorization);headers.append("Content-Type: application/json");headers.append("Accept: application/json");
+    // Best-effort overwrite of the caller-owned header copy. libcurl keeps its own
+    // curl_slist copy only for the lifetime of this request.
+    std::fill(authorization.begin(),authorization.end(),'\0');
     std::string url=api.base_url;while(url.back()=='/')url.pop_back();url+="/chat/completions";
-    std::vector<std::string> args={"curl","-q","--globoff","--silent","--show-error","--proto","=https","--request","POST",
-        "--max-time",std::to_string(api.timeout_seconds),"--connect-timeout",std::to_string(std::min(10,api.timeout_seconds)),
-        "--max-filesize",std::to_string(response_limit),"--header","@"+auth,"--data-binary","@"+request,
-        "--write-out","\n%{http_code}","--url",url};
-    std::vector<char*> argv;for(auto& a:args)argv.push_back(a.data());argv.push_back(nullptr);
-    // Do not inherit the API key environment into curl.
-    std::vector<std::string> env;
-    for(char** e=environ;*e;++e)if(!std::string(*e).starts_with("DEEPSEEK_API_KEY="))env.emplace_back(*e);
-    std::vector<char*> envp;for(auto& e:env)envp.push_back(e.data());envp.push_back(nullptr);
-    int pipes[2];if(pipe(pipes)!=0)throw std::runtime_error("Cannot create HTTP pipe");
-    fcntl(pipes[0],F_SETFD,FD_CLOEXEC);fcntl(pipes[1],F_SETFD,FD_CLOEXEC);
-    posix_spawn_file_actions_t actions;posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions,pipes[1],STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions,pipes[0]);posix_spawn_file_actions_addclose(&actions,pipes[1]);
-    posix_spawn_file_actions_addopen(&actions,STDERR_FILENO,"/dev/null",O_WRONLY,0);
-    Child child;child.fd=pipes[0];
-    int status=posix_spawnp(&child.pid,"curl",&actions,nullptr,argv.data(),envp.data());
-    posix_spawn_file_actions_destroy(&actions);close(pipes[1]);
-    if(status!=0){child.pid=-1;throw std::runtime_error("Cannot start curl; install system curl for live API mode");}
-    fcntl(child.fd,F_SETFL,O_NONBLOCK);
-    auto start=Clock::now();std::string output;bool eof=false;int exit_status=0;
-    while(!eof||!child.reaped) {
-        if(cancelled)throw std::runtime_error("API request cancelled");
-        if(elapsed_ms(start)>(api.timeout_seconds+2)*1000.0)throw std::runtime_error("API request timed out");
-        pollfd p{eof?-1:child.fd,POLLIN,0};poll(&p,1,50);
-        char buffer[8192];
-        while(true) {
-            auto n=read(child.fd,buffer,sizeof(buffer));
-            if(n==0){eof=true;break;}
-            if(n<0){if(errno==EINTR)continue;if(errno!=EAGAIN&&errno!=EWOULDBLOCK)throw std::runtime_error("HTTP response read failed");break;}
-            output.append(buffer,static_cast<size_t>(n));
-            if(output.size()>response_limit+16)throw std::runtime_error("API response exceeds 2 MB limit");
-        }
-        if(!child.reaped) {
-            auto waited=waitpid(child.pid,&exit_status,WNOHANG);
-            if(waited==child.pid)child.reaped=true;
-            else if(waited<0&&errno!=EINTR)throw std::runtime_error("Cannot wait for curl");
-        }
-    }
-    if(!WIFEXITED(exit_status)||WEXITSTATUS(exit_status)!=0) {
-        if(WIFEXITED(exit_status)&&WEXITSTATUS(exit_status)==28)throw std::runtime_error("API request timed out");
-        throw std::runtime_error("curl transport failed (exit "+std::to_string(WIFEXITED(exit_status)?WEXITSTATUS(exit_status):-1)+")");
-    }
-    auto newline=output.rfind('\n');
-    if(newline==std::string::npos)throw std::runtime_error("Missing HTTP status");
-    auto code=output.substr(newline+1);
-    if(code.size()!=3||code[0]!='2')throw std::runtime_error("API HTTP error: "+code);
-    Json response;try{response=Json::parse(output.substr(0,newline));}catch(...){throw std::runtime_error("Invalid API JSON response");}
-    return response;
+    char error[CURL_ERROR_SIZE]={};
+    option(handle.value,CURLOPT_URL,url.c_str());
+#if LIBCURL_VERSION_NUM >= 0x075500
+    option(handle.value,CURLOPT_PROTOCOLS_STR,"https");
+#else
+    option(handle.value,CURLOPT_PROTOCOLS,static_cast<long>(CURLPROTO_HTTPS));
+#endif
+    option(handle.value,CURLOPT_FOLLOWLOCATION,0L);
+    option(handle.value,CURLOPT_POST,1L);
+    option(handle.value,CURLOPT_POSTFIELDS,request.data());
+    option(handle.value,CURLOPT_POSTFIELDSIZE_LARGE,static_cast<curl_off_t>(request.size()));
+    option(handle.value,CURLOPT_HTTPHEADER,headers.value);
+    option(handle.value,CURLOPT_WRITEFUNCTION,receive);
+    option(handle.value,CURLOPT_WRITEDATA,&response);
+    option(handle.value,CURLOPT_XFERINFOFUNCTION,progress);
+    option(handle.value,CURLOPT_XFERINFODATA,static_cast<void*>(nullptr));
+    option(handle.value,CURLOPT_NOPROGRESS,0L);
+    option(handle.value,CURLOPT_NOSIGNAL,1L);
+    option(handle.value,CURLOPT_CONNECTTIMEOUT_MS,static_cast<long>(std::min(10,api.timeout_seconds)*1000));
+    option(handle.value,CURLOPT_TIMEOUT_MS,static_cast<long>(api.timeout_seconds*1000));
+    option(handle.value,CURLOPT_MAXFILESIZE_LARGE,static_cast<curl_off_t>(response_limit));
+    option(handle.value,CURLOPT_SSL_VERIFYPEER,1L);
+    option(handle.value,CURLOPT_SSL_VERIFYHOST,2L);
+    option(handle.value,CURLOPT_NETRC,static_cast<long>(CURL_NETRC_IGNORED));
+    option(handle.value,CURLOPT_USERAGENT,"agentic-text2sql-cpp/1.0");
+    option(handle.value,CURLOPT_ACCEPT_ENCODING,"");
+    option(handle.value,CURLOPT_ERRORBUFFER,error);
+    auto status=curl_easy_perform(handle.value);
+    if(response.too_large)throw std::runtime_error("API response exceeds 2 MB limit");
+    if(status==CURLE_ABORTED_BY_CALLBACK&&cancelled)throw std::runtime_error("API request cancelled");
+    if(status==CURLE_OPERATION_TIMEDOUT)throw std::runtime_error("API request timed out");
+    if(status!=CURLE_OK)throw std::runtime_error(std::string("libcurl transport failed: ")+curl_easy_strerror(status));
+    long http_status=0;
+    if(curl_easy_getinfo(handle.value,CURLINFO_RESPONSE_CODE,&http_status)!=CURLE_OK)
+        throw std::runtime_error("Cannot read API HTTP status");
+    if(http_status<200||http_status>=300)throw std::runtime_error("API HTTP error: "+std::to_string(http_status));
+    Json parsed;try{parsed=Json::parse(response.data);}catch(...){throw std::runtime_error("Invalid API JSON response");}
+    return parsed;
 }
 Completion deepseek(ApiOptions api) {
     return [api=std::move(api)](const Json& messages,const Json& tools){return parse_completion(curl_post(api,request_body(api,messages,tools)));};

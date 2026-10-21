@@ -1,6 +1,8 @@
 #include "agent.h"
 #include "benchmark.h"
 #include "demo.h"
+#include <csignal>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -8,10 +10,24 @@
 #include <sstream>
 #include <set>
 #include <stdexcept>
+#include <vector>
+#ifdef _WIN32
+#include <io.h>
+#include <shellapi.h>
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 using namespace t2s;
 namespace {
+bool stdin_is_terminal() {
+#ifdef _WIN32
+    return _isatty(_fileno(stdin))!=0;
+#else
+    return isatty(STDIN_FILENO)!=0;
+#endif
+}
 const char* help=R"(Agentic Text-to-SQL — C++20 / SQLite / DeepSeek Flash
 Usage:
   text2sql [--db PATH] [--config PATH] [--verbose] [--json]
@@ -24,7 +40,7 @@ Usage:
   text2sql --help
 
 Global option: --config PATH (default: config.json if present).
-Live query/benchmark require DEEPSEEK_API_KEY or config.json and system curl.
+Live query/benchmark require DEEPSEEK_API_KEY or config.json; HTTP uses libcurl.
 Demo Mode (Mock LLM): no key, network or external dataset required.
 Default startup enters a standard REPL. Commands:
   /help, /open <path>, /tables, /schema, /model, /verbose on|off, /exit
@@ -132,7 +148,7 @@ int repl(const Args& args,const Config& config) {
     if(!args.json)std::cout<<"Agentic Text-to-SQL\nModel: "<<safe_text(config.api.model)<<"\nType /help for commands.\n\n";
     std::string input;
     while(!cancelled) {
-        if(!args.json&&isatty(STDIN_FILENO))std::cout<<"> "<<std::flush;
+        if(!args.json&&stdin_is_terminal())std::cout<<"> "<<std::flush;
         if(!std::getline(std::cin,input))break;
         input=trim(input);if(input.empty())continue;
         try {
@@ -167,8 +183,8 @@ int repl(const Args& args,const Config& config) {
     return cancelled?130:0;
 }
 }
-int main(int argc,char** argv) {
-    struct sigaction action{};action.sa_handler=[](int){cancelled=1;};sigemptyset(&action.sa_mask);sigaction(SIGINT,&action,nullptr);
+int application_main(int argc,char** argv) {
+    std::signal(SIGINT,[](int){cancelled=1;});
     bool json=false;for(int i=1;i<argc;++i)if(std::string(argv[i])=="--json")json=true;
     Args args;Config config;
     try {
@@ -198,3 +214,33 @@ int main(int argc,char** argv) {
         print_result(result,args.json,args.verbose);return cancelled?130:result.value("success",false)?0:1;
     }catch(const std::exception& e){print_result(Json{{"success",false},{"error",e.what()}},args.json,false);return cancelled?130:1;}
 }
+
+#ifdef _WIN32
+namespace {
+std::string to_utf8(const wchar_t* value) {
+    if(!value)return {};
+    int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value,-1,nullptr,0,nullptr,nullptr);
+    if(size<=0)throw std::runtime_error("Cannot decode Windows command line as UTF-8");
+    std::string result(static_cast<size_t>(size),'\0');
+    if(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value,-1,result.data(),size,nullptr,nullptr)<=0)
+        throw std::runtime_error("Cannot decode Windows command line as UTF-8");
+    result.pop_back();
+    return result;
+}
+}
+int main() {
+    SetConsoleCP(CP_UTF8);SetConsoleOutputCP(CP_UTF8);
+    int argc=0;LPWSTR* wide=CommandLineToArgvW(GetCommandLineW(),&argc);
+    if(!wide){std::cerr<<"Error: Cannot parse Windows command line\n";return 2;}
+    try {
+        std::vector<std::string> values;values.reserve(static_cast<size_t>(argc));
+        for(int i=0;i<argc;++i)values.push_back(to_utf8(wide[i]));
+        LocalFree(wide);wide=nullptr;
+        std::vector<char*> argv;argv.reserve(values.size());
+        for(auto& value:values)argv.push_back(value.data());
+        return application_main(argc,argv.data());
+    }catch(const std::exception& e){if(wide)LocalFree(wide);std::cerr<<"Error: "<<e.what()<<'\n';return 2;}
+}
+#else
+int main(int argc,char** argv){return application_main(argc,argv);}
+#endif
