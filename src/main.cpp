@@ -93,6 +93,17 @@ std::string safe_text(std::string s) {
     }
     return out;
 }
+std::string safe_multiline(std::string s) {
+    std::string out;
+    for(unsigned char c:s) {
+        if(c=='\n')out+='\n';
+        else if(c=='\t')out+="    ";
+        else if(c=='\r'){}
+        else if(c<32||c==127)out+='?';
+        else out+=static_cast<char>(c);
+    }
+    return out;
+}
 size_t width(const std::string& s) {
     size_t n=0;for(unsigned char c:s)if((c&0xc0)!=0x80)n+=c>=0xe0?2:1;return n;
 }
@@ -130,7 +141,7 @@ void print_result(const Json& r,bool json,bool verbose) {
         std::cout<<"\nSQL:\n"<<q["sql"].get<std::string>()<<'\n';
         if(q["success"].get<bool>()){std::cout<<"\nResults:\n";table(q);}
     }
-    if(r.contains("answer")&&!r["answer"].get<std::string>().empty())std::cout<<'\n'<<safe_text(r["answer"].get<std::string>())<<'\n';
+    if(r.contains("answer")&&!r["answer"].get<std::string>().empty())std::cout<<'\n'<<safe_multiline(r["answer"].get<std::string>())<<'\n';
     if(verbose&&r.contains("agent_steps"))std::cout<<"Agent steps: "<<r["agent_steps"]<<", SQL attempts: "<<r["sql_attempts"]<<", repairs: "<<r["repairs"]<<", elapsed: "<<r["elapsed_ms"]<<" ms\n";
 }
 void show_schema(Database& db,bool json) {

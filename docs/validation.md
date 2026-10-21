@@ -20,7 +20,7 @@ cmake --build build-sanitize -j 4
 ctest --test-dir build-sanitize --output-on-failure
 ```
 
-切换 libcurl 并加入跨平台适配后，普通构建及 ASan/UBSan 构建的 CTest 均为 **5/5 通过**，没有 sanitizer 错误。独立运行测试程序输出 **71 项核心检查通过**、**21 项跨平台 Benchmark 检查通过**。
+切换 libcurl 并加入跨平台适配后，普通构建及 ASan/UBSan 构建的 CTest 均为 **5/5 通过**，没有 sanitizer 错误。独立运行测试程序输出 **72 项核心检查通过**、**21 项跨平台 Benchmark 检查通过**。
 
 ## Demo 实际结果
 

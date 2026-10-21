@@ -62,7 +62,7 @@ Json run_agent(Database& db,const std::string& question,Completion complete,Agen
     auto start=Clock::now();auto out=initial_result();
     int attempts=0,repairs=0,tool_count=0;
     bool needs_repair=false;
-    bool last_sql_ok=false;std::string stop;
+    bool last_sql_ok=false,successful_schema_tool=false;std::string stop;
     Json messages=Json::array({Json{{"role","system"},{"content",std::string(system_prompt)+
         " Limits: steps="+std::to_string(options.max_steps)+", SQL attempts="+std::to_string(options.max_sql_attempts)+", repairs="+std::to_string(options.max_repairs)+"."}},
         Json{{"role","user"},{"content",question}}});
@@ -77,7 +77,7 @@ Json run_agent(Database& db,const std::string& question,Completion complete,Agen
             auto message=validated_reply(reply);messages.push_back(message);
             if(!message.contains("tool_calls")) {
                 out["answer"]=message.value("content",std::string(""));
-                if(last_sql_ok){out["success"]=true;stop="completed";}
+                if(last_sql_ok||(attempts==0&&successful_schema_tool)){out["success"]=true;stop="completed";}
                 else stop="unable_to_answer";
                 break;
             }
@@ -95,10 +95,12 @@ Json run_agent(Database& db,const std::string& question,Completion complete,Agen
                     if(name=="list_tables") {
                         if(!args.empty())throw std::runtime_error("list_tables takes no arguments");
                         result={{"success",true},{"tables",db.list_tables()}};
+                        successful_schema_tool=true;
                     } else if(name=="describe_tables") {
                         if(args.size()!=1||!args.contains("tables")||!args["tables"].is_array()||args["tables"].empty()||args["tables"].size()>100)
                             throw std::runtime_error("describe_tables requires tables: nonempty string array");
                         result={{"success",true},{"tables",db.describe_tables(args["tables"].get<std::vector<std::string>>())}};
+                        successful_schema_tool=true;
                     } else if(name=="execute_sql") {
                         if(args.size()!=1||!args.contains("sql")||!args["sql"].is_string())throw std::runtime_error("execute_sql requires sql: string");
                         if(attempts>=options.max_sql_attempts){stop="sql_attempt_limit";throw std::runtime_error("SQL attempt limit reached");}

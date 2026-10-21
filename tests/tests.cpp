@@ -28,6 +28,14 @@ int main() {
     auto company=Database::from_sql("CREATE TABLE departments(id INTEGER PRIMARY KEY,name TEXT); CREATE TABLE employees(id INTEGER PRIMARY KEY,name TEXT,department_id INTEGER REFERENCES departments(id),salary REAL); INSERT INTO departments VALUES(1,'Engineering'); INSERT INTO employees VALUES(1,'Alice',1,100),(2,'Bob',1,80);");
     auto normal=run_agent(*company,"top salaries",mock_demo());
     check(normal["success"]&&normal["sql_attempts"]==1,"normal agent");
+    auto schema_only=[step=0](const Json&,const Json&)mutable {
+        Json message{{"role","assistant"},{"content",nullptr}};
+        if(step++==0)message["tool_calls"]={tool_call("tables-only","list_tables",Json::object())};
+        else message["content"]="The database has departments and employees.\nBoth are tables.";
+        return Json{{"message",message}};
+    };
+    auto schema_answer=run_agent(*company,"What tables exist?",schema_only);
+    check(schema_answer["success"]&&schema_answer["termination"]=="completed"&&schema_answer["sql_attempts"]==0,"schema-only answer succeeds");
     auto repaired=run_agent(*company,"top salaries",mock_demo(true));
     check(repaired["success"]&&repaired["sql_attempts"]==2&&repaired["repairs"]==1,"repair agent");
     AgentOptions few;few.max_steps=2;
