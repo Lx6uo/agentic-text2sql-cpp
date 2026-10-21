@@ -13,8 +13,8 @@
 #include <vector>
 #ifdef _WIN32
 #include <io.h>
-#include <shellapi.h>
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <unistd.h>
 #endif

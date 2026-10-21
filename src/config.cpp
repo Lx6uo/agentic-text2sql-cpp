@@ -41,7 +41,12 @@ Config load_config(const std::string& path,bool required) {
             number(d,"max_sql_bytes",c.database.max_sql_bytes,1,65536);number(d,"max_result_bytes",c.database.max_result_bytes,1024,16777216);
         }
     } else if(required) throw std::runtime_error("Config file not found");
-    if(const char* key=std::getenv("DEEPSEEK_API_KEY")) c.api.api_key=key;
+#ifdef _WIN32
+    char* key=nullptr;size_t length=0;
+    if(_dupenv_s(&key,&length,"DEEPSEEK_API_KEY")==0&&key){c.api.api_key=key;std::free(key);}
+#else
+    if(const char* key=std::getenv("DEEPSEEK_API_KEY"))c.api.api_key=key;
+#endif
     if(c.api.model.empty()) throw std::runtime_error("Model must not be empty");
     return c;
 }
