@@ -1,0 +1,139 @@
+@page {
+  size: A4;
+  margin: 14mm 14mm 16mm;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  background: #ffffff;
+  color: #1f2937;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Noto Sans CJK SC", "Arial Unicode MS", Arial, sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.5;
+}
+
+body {
+  max-width: 182mm;
+  margin: 0 auto;
+  padding: 0;
+}
+
+h1 {
+  margin: 0 0 5mm;
+  padding: 0 0 3mm;
+  color: #0f3d73;
+  font-size: 25pt;
+  line-height: 1.2;
+  border-bottom: 2px solid #2f80ed;
+}
+
+h2 {
+  margin: 6mm 0 2.5mm;
+  color: #174f8f;
+  font-size: 15.5pt;
+  line-height: 1.25;
+  page-break-after: avoid;
+  break-after: avoid-page;
+}
+
+h3 {
+  margin: 4mm 0 2mm;
+  color: #2867a8;
+  font-size: 12pt;
+  page-break-after: avoid;
+}
+
+p { margin: 1.8mm 0; }
+
+ul, ol {
+  margin: 1.5mm 0 2.5mm 6mm;
+  padding-left: 4mm;
+}
+
+li { margin: 0.8mm 0; }
+
+blockquote {
+  margin: 3mm 0;
+  padding: 2.5mm 4mm;
+  color: #334155;
+  background: #eef6ff;
+  border-left: 4px solid #2f80ed;
+  page-break-inside: avoid;
+}
+
+blockquote p { margin: 0.8mm 0; }
+
+table {
+  width: 100%;
+  margin: 2.5mm 0 4mm;
+  border-collapse: collapse;
+  font-size: 9.2pt;
+  page-break-inside: avoid;
+}
+
+th, td {
+  padding: 1.8mm 2.2mm;
+  vertical-align: top;
+  border: 1px solid #cbd5e1;
+}
+
+th {
+  color: #123b69;
+  font-weight: 650;
+  background: #e8f2ff;
+}
+
+tr:nth-child(even) td { background: #f8fafc; }
+
+pre {
+  margin: 2.5mm 0 4mm;
+  padding: 3mm 3.5mm;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: #e5edf7;
+  background: #142033;
+  border-radius: 5px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 8.4pt;
+  line-height: 1.42;
+  page-break-inside: avoid;
+}
+
+code {
+  color: #9a3412;
+  background: #fff7ed;
+  border-radius: 3px;
+  padding: 0.15em 0.35em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
+pre code {
+  color: inherit;
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+
+strong { color: #0f3d73; }
+
+a {
+  color: #1769aa;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+hr {
+  margin: 5mm 0;
+  border: 0;
+  border-top: 1px solid #cbd5e1;
+}
+
+img, svg { max-width: 100%; }
+
+@media print {
+  a { color: #174f8f; }
+  h1, h2, h3, table, pre, blockquote { break-inside: avoid; }
+}

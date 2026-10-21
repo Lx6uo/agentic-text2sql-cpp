@@ -120,30 +120,43 @@ Agent steps: 5, SQL attempts: 2, repairs: 1
 
 ### 6.2 真实自然语言查询
 
-需先填写 `config.json`；以下第一行仅在示例数据库不存在时创建它。
+需先填写 `config.json`。示例数据库不存在时，先创建：
 
 ```bash
 test -f data/company.sqlite || sqlite3 data/company.sqlite < examples/demo.sql
-./build/text2sql query \
-  --db data/company.sqlite \
-  --question "查询平均工资最高的三个部门，返回部门名称、平均工资和员工人数" \
-  --verbose
 ```
 
-核心输出：
+启动交互式命令行，并直接输入自然语言：
 
 ```text
+$ ./build/text2sql --db data/company.sqlite --verbose
+Agentic Text-to-SQL
+Model: deepseek-flash
+Type /help for commands.
+
+> 查询平均工资最高的三个部门，返回部门名称、平均工资和员工人数
 [1] list_tables: Success
 [2] describe_tables: Success
 [3] execute_sql: Success
+
+SQL:
+SELECT d.name AS 部门名称, AVG(e.salary) AS 平均工资,
+       COUNT(e.id) AS 员工人数
+FROM employees e
+JOIN departments d ON e.department_id = d.id
+GROUP BY d.id, d.name
+ORDER BY 平均工资 DESC
+LIMIT 3
 
 Results:
 部门名称     平均工资  员工人数
 Engineering  115000.0  2
 Finance      95000.0   2
 Marketing    82500.0   2
+3 row(s)
 
 Agent steps: 4, SQL attempts: 1, repairs: 0
+>
 ```
 
 > 真实模型生成的 SQL、措辞和耗时可能略有变化；数据库结果应一致。

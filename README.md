@@ -4,7 +4,7 @@
 
 支持标准输入 REPL、一次性查询、Schema 查看、verbose 和 JSON 输出；提供真正执行 SQLite 的离线 Mock Demo，以及 Spider 1.0 Baseline/Agentic 对照评价。
 
-需要用于课程展示、技术答辩或制作 PPT 时，可直接阅读[完整项目汇报文稿](docs/project-report.md)。文稿包含背景、架构、安全、实验、限制、路线图、16 页 PPT 大纲和答辩问答。
+需要用于课程展示、技术答辩或制作 PPT 时，可阅读[精简项目汇报](docs/project-report.md)，或直接下载 [PDF 打印版](docs/Agentic-Text-to-SQL-项目汇报.pdf)。
 
 ## 构建与测试
 
