@@ -146,6 +146,157 @@ Results:
 
 JSON 模式保证 stdout 只有有效 JSON，错误和 verbose 日志进入 stderr，便于后续被脚本、桌面程序或其他服务调用。
 
+### 5.4 可直接复制运行的输入输出实录
+
+以下命令均从项目根目录执行。示例一和示例五完全离线，不需要 API Key；示例二至示例四使用 `data/company.sqlite`。如果该文件不存在，可先执行：
+
+```bash
+sqlite3 data/company.sqlite < examples/demo.sql
+```
+
+真实模型查询还要求已经复制并填写 `config.json`。离线输出中的耗时会因机器而变化；真实 DeepSeek 生成的 SQL 格式、回答措辞、耗时和 token 可能随每次运行略有变化，但查询语义和数据库结果应保持一致。
+
+#### 示例一：离线体验 SQL 出错并自动修正
+
+输入：
+
+```bash
+./build/text2sql demo --repair --verbose
+```
+
+本次实际输出：
+
+```text
+[1] list_tables: Success
+[2] describe_tables: Success
+[3] execute_sql: Failed — no such column: department_name
+[4] execute_sql: Success
+Demo Mode (Mock LLM)
+
+SQL:
+SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary FROM employees e JOIN departments d ON e.department_id = d.id GROUP BY d.id, d.name ORDER BY average_salary DESC LIMIT 3
+
+Results:
+department   average_salary
+Engineering  115000.0
+Finance      95000.0
+Marketing    82500.0
+3 row(s)
+
+已按平均工资降序查询三个部门。结果来自真实 SQLite 执行。
+Agent steps: 5, SQL attempts: 2, repairs: 1, elapsed: 0.957667 ms
+```
+
+这段输出可以直接用于 PPT 演示 Agent 的闭环：前两步发现表和字段，第三步收到真实 SQLite 字段错误，第四步修正后执行成功。
+
+#### 示例二：不调用模型，直接查看数据库结构
+
+输入：
+
+```bash
+./build/text2sql schema --db data/company.sqlite
+```
+
+实际输出：
+
+```text
+departments (table)
+  id INTEGER PRIMARY KEY
+  name TEXT
+employees (table)
+  id INTEGER PRIMARY KEY
+  name TEXT
+  department_id INTEGER
+  salary REAL
+  note TEXT
+  FK "department_id" -> "departments"."id"
+```
+
+这个命令只在本地读取 SQLite Schema，不使用 API Key，也不产生模型费用。
+
+#### 示例三：真实 DeepSeek 回答“数据库有哪些表”
+
+输入：
+
+```bash
+./build/text2sql query \
+  --db data/company.sqlite \
+  --question "这个数据库有哪些表？" \
+  --verbose
+```
+
+本次真实 API 输出：
+
+```text
+[1] list_tables: Success
+
+这个数据库包含 2 张表：
+
+1. **departments**（部门表）
+2. **employees**（员工表）
+
+需要我查看这些表的字段结构或数据内容吗？
+Agent steps: 2, SQL attempts: 0, repairs: 0, elapsed: 1968.932292 ms
+```
+
+这个问题只需要 Schema 信息，因此 Agent 调用 `list_tables` 后直接完成，没有为了形式而执行无意义 SQL。
+
+#### 示例四：真实 DeepSeek 完成 JOIN、聚合和排序
+
+输入：
+
+```bash
+./build/text2sql query \
+  --db data/company.sqlite \
+  --question "查询平均工资最高的三个部门，返回部门名称、平均工资和员工人数" \
+  --verbose
+```
+
+本次真实 API 输出：
+
+```text
+[1] list_tables: Success
+[2] describe_tables: Success
+[3] execute_sql: Success
+
+SQL:
+SELECT d.name AS 部门名称, AVG(e.salary) AS 平均工资, COUNT(e.id) AS 员工人数 FROM employees e JOIN departments d ON e.department_id = d.id WHERE e.salary IS NOT NULL GROUP BY d.id, d.name ORDER BY 平均工资 DESC LIMIT 3
+
+Results:
+部门名称     平均工资  员工人数
+Engineering  115000.0  2
+Finance      95000.0   2
+Marketing    82500.0   2
+3 row(s)
+
+平均工资最高的三个部门如下（按平均工资降序）：
+
+| 部门名称 | 平均工资 | 员工人数 |
+|---|---|---|
+| Engineering | 115,000.0 | 2 |
+| Finance | 95,000.0 | 2 |
+| Marketing | 82,500.0 | 2 |
+
+说明：查询将 `employees` 与 `departments` 按部门 ID 关联，按部门分组计算工资平均值（排除工资为空的记录）和员工人数，取平均工资最高的 3 个部门。
+Agent steps: 4, SQL attempts: 1, repairs: 0, elapsed: 3647.364833 ms
+```
+
+#### 示例五：输出机器可读 JSON
+
+输入：
+
+```bash
+./build/text2sql demo --repair --json
+```
+
+实际 stdout 是一个完整 JSON 文档：
+
+```json
+{"agent_steps":5,"answer":"已按平均工资降序查询三个部门。结果来自真实 SQLite 执行。","elapsed_ms":0.973125,"error":null,"mode":"Demo Mode (Mock LLM)","query":{"cancelled":false,"columns":["department","average_salary"],"error":null,"execution_ms":0.13175,"query_id":2,"rows":[["Engineering",115000.0],["Finance",95000.0],["Marketing",82500.0]],"sql":"SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary FROM employees e JOIN departments d ON e.department_id = d.id GROUP BY d.id, d.name ORDER BY average_salary DESC LIMIT 3","success":true,"timed_out":false,"truncated":false},"repairs":1,"sql_attempts":2,"success":true,"termination":"completed","tool_calls":4,"trace":[{"step":1,"success":true,"tool":"list_tables"},{"step":2,"success":true,"tool":"describe_tables"},{"error":"no such column: department_name","step":3,"success":false,"tool":"execute_sql"},{"step":4,"success":true,"tool":"execute_sql"}],"usage":{}}
+```
+
+JSON 中同时保留最终答案、SQL、类型化结果、错误修正轨迹、停止原因和统计信息，可以直接被其他程序解析。
+
 ---
 
 ## 6. 系统架构
