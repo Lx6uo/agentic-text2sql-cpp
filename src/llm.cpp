@@ -161,10 +161,10 @@ Json tool_call(const std::string& id,const std::string& name,const Json& args) {
 Completion mock_demo(bool repair) {
     return [repair,step=0](const Json&,const Json&)mutable {
         Json message{{"role","assistant"},{"content",nullptr}};
-        if(step==0)message["tool_calls"]={tool_call("tables","list_tables",Json::object())};
-        else if(step==1)message["tool_calls"]={tool_call("schema","describe_tables",{{"tables",{"employees","departments"}}})};
-        else if(step==2&&repair)message["tool_calls"]={tool_call("bad","execute_sql",{{"sql","SELECT department_name, AVG(salary) FROM employees GROUP BY department_name"}})};
-        else if(step==2|| (step==3&&repair))message["tool_calls"]={tool_call("query","execute_sql",{{"sql","SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary FROM employees e JOIN departments d ON e.department_id = d.id GROUP BY d.id, d.name ORDER BY average_salary DESC LIMIT 3"}})};
+        if(step==0)message["tool_calls"]=Json::array({tool_call("tables","list_tables",Json::object())});
+        else if(step==1)message["tool_calls"]=Json::array({tool_call("schema","describe_tables",{{"tables",{"employees","departments"}}})});
+        else if(step==2&&repair)message["tool_calls"]=Json::array({tool_call("bad","execute_sql",{{"sql","SELECT department_name, AVG(salary) FROM employees GROUP BY department_name"}})});
+        else if(step==2|| (step==3&&repair))message["tool_calls"]=Json::array({tool_call("query","execute_sql",{{"sql","SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary FROM employees e JOIN departments d ON e.department_id = d.id GROUP BY d.id, d.name ORDER BY average_salary DESC LIMIT 3"}})});
         else message["content"]="已按平均工资降序查询三个部门。结果来自真实 SQLite 执行。";
         ++step;return Json{{"message",message},{"usage",Json::object()}};
     };

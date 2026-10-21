@@ -45,9 +45,9 @@ Completion completion() {
         if(tools.empty())message["content"]="SELECT COUNT(*) FROM employees";
         else {
             size_t calls=0;for(const auto& item:messages)if(item["role"]=="tool")++calls;
-            if(calls==0)message["tool_calls"]={tool_call("tables","list_tables",Json::object())};
-            else if(calls==1)message["tool_calls"]={tool_call("schema","describe_tables",{{"tables",{"employees"}}})};
-            else if(calls==2)message["tool_calls"]={tool_call("query","execute_sql",{{"sql","SELECT COUNT(*) FROM employees"}})};
+            if(calls==0)message["tool_calls"]=Json::array({tool_call("tables","list_tables",Json::object())});
+            else if(calls==1)message["tool_calls"]=Json::array({tool_call("schema","describe_tables",{{"tables",{"employees"}}})});
+            else if(calls==2)message["tool_calls"]=Json::array({tool_call("query","execute_sql",{{"sql","SELECT COUNT(*) FROM employees"}})});
             else message["content"]="There are two employees.";
         }
         return Json{{"message",message},{"usage",{{"total_tokens",5}}}};

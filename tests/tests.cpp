@@ -30,7 +30,7 @@ int main() {
     check(normal["success"]&&normal["sql_attempts"]==1,"normal agent");
     auto schema_only=[step=0](const Json&,const Json&)mutable {
         Json message{{"role","assistant"},{"content",nullptr}};
-        if(step++==0)message["tool_calls"]={tool_call("tables-only","list_tables",Json::object())};
+        if(step++==0)message["tool_calls"]=Json::array({tool_call("tables-only","list_tables",Json::object())});
         else message["content"]="The database has departments and employees.\nBoth are tables.";
         return Json{{"message",message}};
     };
@@ -40,19 +40,31 @@ int main() {
     check(repaired["success"]&&repaired["sql_attempts"]==2&&repaired["repairs"]==1,"repair agent");
     AgentOptions few;few.max_steps=2;
     check(run_agent(*company,"top salaries",mock_demo(),few)["termination"]=="step_limit","step limit");
-    Completion fail=[sequence=0](const Json&,const Json&)mutable{return Json{{"message",{{"role","assistant"},{"content",nullptr},{"tool_calls",{tool_call("id"+std::to_string(sequence++),"execute_sql",{{"sql","SELECT nonexistent FROM employees"}})}}}}};};
+    Completion fail=[sequence=0](const Json&,const Json&)mutable {
+        Json message{{"role","assistant"},{"content",nullptr}};
+        message["tool_calls"]=Json::array({tool_call("id"+std::to_string(sequence++),"execute_sql",{{"sql","SELECT nonexistent FROM employees"}})});
+        return Json{{"message",message}};
+    };
     auto repeated=run_agent(*company,"bad",fail);
     check(!repeated["success"]&&repeated["sql_attempts"]==3&&repeated["termination"]=="sql_attempt_limit","attempt limit");
     AgentOptions no_repair;no_repair.max_repairs=0;
     check(run_agent(*company,"bad",fail,no_repair)["termination"]=="repair_limit","repair limit");
     auto invalid=[count=0](const Json& messages,const Json&)mutable {
-        if(count++==0)return Json{{"message",{{"role","assistant"},{"content",nullptr},{"tool_calls",{tool_call("x","unknown",Json::object()),tool_call("y","execute_sql",Json::object()),tool_call("z","describe_tables",{{"tables",{1}}})}}}}};
+        if(count++==0) {
+            Json message{{"role","assistant"},{"content",nullptr}};
+            message["tool_calls"]=Json::array({tool_call("x","unknown",Json::object()),tool_call("y","execute_sql",Json::object()),tool_call("z","describe_tables",{{"tables",{1}}})});
+            return Json{{"message",message}};
+        }
         check(messages.size()==6,"all tool results in context");
         for(size_t i=3;i<6;++i)check(messages[i]["role"]=="tool"&&messages[i].contains("tool_call_id"),"tool_call_id context");
         return Json{{"message",{{"role","assistant"},{"content","Cannot answer"}}}};
     };
     auto bad=run_agent(*company,"bad",invalid);check(bad["termination"]=="unable_to_answer"&&bad["trace"].size()==3,"invalid calls bounded");
-    Completion malformed=[](const Json&,const Json&){return Json{{"message",{{"role","assistant"},{"tool_calls",{Json{{"type","function"}}}}}}};};
+    Completion malformed=[](const Json&,const Json&) {
+        Json message{{"role","assistant"},{"content",nullptr}};
+        message["tool_calls"]=Json::array({Json{{"type","function"}}});
+        return Json{{"message",message}};
+    };
     check(run_agent(*company,"bad",malformed)["termination"]=="api_error","malformed API envelope");
     ApiOptions empty;
     check(run_agent(*company,"q",deepseek(empty))["error"].get<std::string>().find("Missing API key")!=std::string::npos,"missing API key");
@@ -92,10 +104,10 @@ int main() {
     auto ref=Database::from_sql("",reference_options);check(ref->execute("SELECT \"historical string literal\"")["success"],"reference DQS compatibility");
     auto arbitrary=[step=0](const Json& messages,const Json&)mutable {
         Json m{{"role","assistant"},{"content",nullptr}};
-        if(step==0)m["tool_calls"]={tool_call("s","describe_tables",{{"tables",{"订单 明细"}}})};
+        if(step==0)m["tool_calls"]=Json::array({tool_call("s","describe_tables",{{"tables",{"订单 明细"}}})});
         else if(step==1) {
             check(messages.back()["content"].get<std::string>().find("商品名")!=std::string::npos,"actual arbitrary schema in context");
-            m["tool_calls"]={tool_call("q","execute_sql",{{"sql","SELECT \"商品名\" FROM \"订单 明细\""}})};
+            m["tool_calls"]=Json::array({tool_call("q","execute_sql",{{"sql","SELECT \"商品名\" FROM \"订单 明细\""}})});
         }else m["content"]="Apple";
         ++step;return Json{{"message",m}};
     };
@@ -104,7 +116,7 @@ int main() {
     auto invalid_json_args=[step=0](const Json&,const Json&)mutable {
         Json m{{"role","assistant"},{"content",nullptr}};
         if(step++==0) {
-            auto call=tool_call("bad-args","execute_sql",Json::object());call["function"]["arguments"]="{";m["tool_calls"]={call};
+            auto call=tool_call("bad-args","execute_sql",Json::object());call["function"]["arguments"]="{";m["tool_calls"]=Json::array({call});
         }else m["content"]="Cannot answer";
         return Json{{"message",m}};
     };
