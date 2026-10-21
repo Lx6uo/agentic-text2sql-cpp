@@ -398,6 +398,8 @@ Spider 是跨领域 Text-to-SQL 公开数据集，包含自然语言问题、标
 
 GitHub Actions 定义了 Ubuntu、macOS、Windows 三个 job。每个平台都会执行依赖安装、CMake 配置、编译、CTest 和离线修正 Demo。CI 不读取真实 API Key，避免在公共流水线中产生费用或泄漏密钥。
 
+首次远端运行真实暴露了 Win32 头文件顺序、MSVC 静态运行库和 JSON 初始化歧义，项目据此连续修复。最终 Ubuntu、macOS、Windows/MSVC 三个平台都完成了配置、编译、5 项 CTest 和离线修正 Demo。这一过程说明跨平台支持不是只写条件编译，而是经过远端原生 runner 验证。
+
 ---
 
 ## 15. 测试与验证
@@ -408,6 +410,7 @@ GitHub Actions 定义了 Ubuntu、macOS、Windows 三个 job。每个平台都�
 - AddressSanitizer/UndefinedBehaviorSanitizer：5/5 通过。
 - 72 项核心检查。
 - 21 项跨平台 Benchmark 检查。
+- GitHub Actions 的 Ubuntu、macOS、Windows/MSVC 全部通过。
 - 真实 DeepSeek Tool Calling。
 - 官方 Spider SQLite 小样本。
 - 安装后、脱离源码目录运行 Demo。

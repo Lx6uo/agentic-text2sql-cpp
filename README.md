@@ -193,4 +193,4 @@ ctest --test-dir build-sanitize --output-on-failure
 
 当前机器的实际验证结果见 [验证记录](docs/validation.md)。libcurl 网络层已完成真实 DeepSeek Tool Calling；官方 Spider dev 前 3 题已跑 Baseline/Agentic 小规模验证。3 题全部来自同一数据库，只证明链路正确，不代表完整 dev 准确率，也不是官方 Test Suite Accuracy。
 
-当前 macOS 已实际验证；Linux 和 Windows 构建由 CI 定义覆盖，本机没有 Windows 环境，需以首次远程 CI 结果作为 MSVC 的最终证据。不支持写数据库、TUI、流式输出、模型训练或官方测试集排行榜提交。SQL 函数白名单、资源上限和严格双引号规则可能拒绝部分合法但超出当前范围的查询。SQLite 防护是进程内机制，极端恶意数据库不等价于被隔离在 OS 沙箱内。终端对齐只做轻量 UTF-8 处理。
+macOS 已完成本地与远端验证；GitHub Actions 的 Ubuntu、macOS、Windows/MSVC 三个平台均已实际通过配置、编译、5 项 CTest 和离线修正 Demo。不支持写数据库、TUI、流式输出、模型训练或官方测试集排行榜提交。SQL 函数白名单、资源上限和严格双引号规则可能拒绝部分合法但超出当前范围的查询。SQLite 防护是进程内机制，极端恶意或损坏数据库不等价于被隔离在 OS 沙箱内。终端对齐只做轻量 UTF-8 处理。

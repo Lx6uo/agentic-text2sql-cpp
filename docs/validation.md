@@ -56,7 +56,7 @@ HTTP 已从系统 curl 子进程迁移为 libcurl。macOS 上使用真实 DeepSe
 - Windows 使用 `CommandLineToArgvW` 读取 UTF-16 参数并转换为 UTF-8，设置 UTF-8 控制台；SQLite 接收 UTF-8 路径，配置/数据集/结果使用 `std::filesystem::path`。
 - CMake 支持 MSVC flags、Shell32 和 vcpkg `curl:x64-windows-static`；CTest 中的核心、Benchmark、帮助和 Demo 测试不依赖 POSIX。
 - `.github/workflows/ci.yml` 定义 Ubuntu、macOS 和 Windows/MSVC 三个平台。
-- 当前仓库没有 remote，工作流尚未在远程 Windows runner 实际执行。本机 macOS 已验证，MSVC 通过需以首次远程 CI 作为最终证据。
+- 公开仓库首次实际验证中暴露并修复了 Win32 头文件顺序、MSVC 静态运行库和 nlohmann/json 初始化歧义。修复后的远端运行 [39551393403](https://github.com/Lx6uo/agentic-text2sql-cpp/actions/runs/39551393403) 三个平台全部通过；每个平台均完成配置、编译、5 项 CTest 和离线修正 Demo。
 
 ## Git 和依赖审查
 
