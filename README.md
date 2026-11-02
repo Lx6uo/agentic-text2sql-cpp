@@ -6,7 +6,7 @@
 
 ## 构建和运行
 
-clone 后已经包含样例数据库和完整 Spider 运行数据，编译后自动连接样例库。无需额外下载数据或使用 Git LFS。
+clone 后已经包含 Spider 的大学数据库 `college_2` 和完整 Spider 运行数据，编译后默认连接 `college_2`。它包含 11 张表、2000 名学生、50 名教师和 200 门课程，适合体验多表关联与统计查询。无需额外下载数据或使用 Git LFS。
 
 需要 C++17、CMake ≥ 3.20、libcurl ≥ 7.68。SQLite 3.50.4 和 cJSON 1.7.19 的固定源码随项目提供，CMake 不在线下载依赖。运行不需要 Python、Node.js 或数据库服务器。
 
@@ -57,7 +57,7 @@ cp config.example.json config.json
     "max_tokens": 2048
   },
   "database": {
-    "path": "data/company.sqlite",
+    "path": "data/college_2.sqlite",
     "timeout_ms": 5000,
     "max_display_rows": 100,
     "max_preview_rows": 10,
@@ -90,23 +90,23 @@ export DEEPSEEK_API_KEY
 
 ```text
 SQLite 自然语言查询
-已连接：company.sqlite
+已连接：college_2.sqlite
 直接输入问题并按回车，每次查询后可以继续提问。
-例如：查询「employees」表的记录总数。
+例如：查询「advisor」表的记录总数。
 输入 /help 查看引导，输入 /exit 退出。
 
-你：查询平均工资最高的部门
+你：查询教师平均工资最高的院系
 ```
 
 数据库可以在 JSON 的 `database.path` 中配置，或通过 `--db` 指定，参数优先：
 
 ```bash
-./build/text2sql --db "data/company.sqlite"
+./build/text2sql --db "data/college_2.sqlite"
 ```
 
-配置中的相对数据库路径以配置文件所在目录为基准。没有提供路径时，默认连接随程序构建的样例数据库，随后持续接收自然语言问题。已连接的数据库在整个会话中保留，每个问题重新建立 AI 上下文；查询结果或错误显示后继续提示 `你：`。
+配置中的相对数据库路径以配置文件所在目录为基准。没有提供路径时，默认连接随程序构建的 `college_2.sqlite`，随后持续接收自然语言问题。已连接的数据库在整个会话中保留，每个问题重新建立 AI 上下文；查询结果或错误显示后继续提示 `你：`。
 
-输入 `/help` 查看引导，`/exit` 退出。单独输入 `help`、`exit`、问候或无查询意图内容，会由模型按系统提示词返回内部固定标记，Agent 捕获后显示统一提示，不执行模型 SQL，也不请求结果分析。含有 help/exit 的有效查询，例如“查询姓名包含 help 的员工”，仍可正常查询。
+输入 `/help` 查看引导，`/exit` 退出。单独输入 `help`、`exit`、问候或无查询意图内容，会由模型按系统提示词返回内部固定标记，Agent 捕获后显示统一提示，不执行模型 SQL，也不请求结果分析。含有 help/exit 的有效查询，例如“查询姓名包含 help 的学生”，仍可正常查询。
 
 要求查看多张表的原始记录时，例如“这两张表内的所有记录”，模型使用一条 SQL 返回“表名”和“记录”两列，每条记录用 JSON 保留所属表的字段和值。这样可以展示字段不同的表，同时保留重复记录；单表和关联查询继续使用普通表格列。显示行数和结果大小仍受配置上限限制。
 
@@ -129,7 +129,8 @@ SQLite 自然语言查询
 
 ```text
 仓库 data/
-├── company.sqlite
+├── college_2.sqlite        # 默认大学数据库，来自 Spider，保留原始内容
+├── company.sqlite          # 小型样例数据库
 ├── sample-spider/          # 2 道中文题及对应数据库
 ├── spider.zip             # 约 57 MiB，普通 Git 文件
 ├── spider-manifest.json

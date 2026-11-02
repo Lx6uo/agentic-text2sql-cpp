@@ -102,6 +102,7 @@ config.*.local.json
 !/data/SHA256SUMS
 !/data/spider.zip
 !/data/spider-manifest.json
+!/data/college_2.sqlite
 !/data/company.sqlite
 !/data/sample-spider/
 /data/sample-spider/*

@@ -7,7 +7,7 @@
     "max_tokens": 2048
   },
   "database": {
-    "path": "data/company.sqlite",
+    "path": "data/college_2.sqlite",
     "timeout_ms": 5000,
     "max_display_rows": 100,
     "max_preview_rows": 10,

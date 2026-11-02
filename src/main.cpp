@@ -23,8 +23,8 @@ string find_bundled_data(string executable) {
     locations[3] = TEXT2SQL_DATA_DIR;
     locations[4] = "data";
     for (int i = 0; i < 5; i++) {
-        string sample = join_path(locations[i], "company.sqlite");
-        if (file_exists(sample)) {
+        string database = join_path(locations[i], "college_2.sqlite");
+        if (file_exists(database)) {
             TextResult path = canonical_path(locations[i]);
             if (path.success) {
                 return path.text;
@@ -60,7 +60,7 @@ int application_main(int argc, char **argv) {
         path = args.db;
     } else if (path.empty()) {
         if (config->bundled_data.empty() == false) {
-            path = join_path(config->bundled_data, "company.sqlite");
+            path = join_path(config->bundled_data, "college_2.sqlite");
         }
     }
     return run_chat(config, path);

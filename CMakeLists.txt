@@ -8,6 +8,7 @@ option(TEXT2SQL_SANITIZERS "Enable address and undefined behavior sanitizers" OF
 # Bundle data is local: clone + build needs no extra dataset download or Python.
 set(TEXT2SQL_DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/data")
 file(MAKE_DIRECTORY "${TEXT2SQL_DATA_DIR}")
+configure_file(data/college_2.sqlite "${TEXT2SQL_DATA_DIR}/college_2.sqlite" COPYONLY)
 configure_file(data/company.sqlite "${TEXT2SQL_DATA_DIR}/company.sqlite" COPYONLY)
 file(COPY data/sample-spider DESTINATION "${TEXT2SQL_DATA_DIR}")
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/data/spider.zip" TEXT2SQL_ARCHIVE_SHA)
