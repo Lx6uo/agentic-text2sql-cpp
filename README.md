@@ -1,8 +1,8 @@
 # SQLite 自然语言查询：课程精简版
 
-使用真实 AI 把自然语言转换成只读 SQLite SQL。程序固定读取表结构、生成 SQL、执行查询；失败后把 SQL 错误交给 AI 修正，总共最多执行三次。启动后直接接收自然语言问题。支持 JSON 配置、Windows/macOS/Linux、离线纠错 Demo，以及 Baseline/纠错模式的 CSV 对照评测。
+使用真实 AI 把自然语言转换成只读 SQLite SQL。程序固定读取表结构、生成 SQL、执行查询；失败后把 SQL 错误交给 AI 修正，总共最多执行三次。启动后直接接收自然语言问题。支持 JSON 配置、Windows/macOS/Linux，以及 Baseline/纠错模式的 CSV 对照评测。
 
-代码使用普通函数、结构体、数组、判断、循环和适量简单指针。变量和控制语句逐步展开，行索引数组一次分配，JSON 与路径细节集中在辅助模块。各功能保留独立 CPP，没有自写头文件或测试目录。阅读顺序与指针释放说明见 [基础代码说明](docs/guides/basic-cpp.md)。
+代码使用普通函数、结构体、数组、判断、循环和适量简单指针。变量和控制语句逐步展开，行索引数组一次分配，JSON 与路径细节集中在辅助模块。各功能保留独立 CPP，没有自写头文件或测试目录。
 
 ## 构建和运行
 
@@ -14,7 +14,6 @@ clone 后已经包含样例数据库和完整 Spider 运行数据，编译后自
 cmake -S . -B build
 cmake --build build -j 4
 ./build/text2sql
-./build/text2sql demo
 ./build/text2sql --help
 ```
 
@@ -34,7 +33,6 @@ cmake -S . -B build -A x64 `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
 cmake --build build --config Release --parallel
 .\build\Release\text2sql.exe
-.\build\Release\text2sql.exe demo
 ```
 
 Windows 保留原生 UTF-16 参数转 UTF-8、UTF-8 控制台、中文路径、MSVC 和静态运行库适配。
@@ -108,13 +106,20 @@ SQLite 自然语言查询
 
 配置中的相对数据库路径以配置文件所在目录为基准。没有提供路径时，默认连接随程序构建的样例数据库，随后持续接收自然语言问题。已连接的数据库在整个会话中保留，每个问题重新建立 AI 上下文；查询结果或错误显示后继续提示 `你：`。
 
-输入 `/demo` 无需 API Key 即可体验本地 SQL 纠错，`/help` 查看引导，`/exit` 退出。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
-
-离线演示使用 `./build/text2sql demo`。Demo 不需要 API Key 或联网，先执行错误字段 `department_name`，随后修正 JOIN 聚合。SQLite 实际返回 Engineering 115000、Finance 95000、Marketing 82500；内置数据与 `examples/demo.sql` 对应。
+输入 `/help` 查看引导，`/exit` 退出。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
 
 ## Benchmark 和 CSV
 
-完整 Spider 已包含在 `data/spider.zip`。CMake 配置时自动解压到 `build/data/spider`，其中包含全部开发/训练/测试题目、206 个不重复 SQLite 库、表元信息和标准 SQL。数据文件来源与校验清单见 [数据说明](data/README.md)。
+完整 Spider 运行数据已包含在 `data/spider.zip`，来源为 [Spider 官方数据](https://yale-lily.github.io/spider)。CMake 配置时自动解压到 `build/data/spider`，其中包含 206 个不重复 SQLite 库、表元信息和标准 SQL。原下载包中的重复数据库合并，题目和数据库内容保留原始字节；上游 README 和引用说明保存在压缩包内。
+
+| 划分 | 题目数 | 数据库数 |
+|---|---:|---:|
+| dev | 1034 | 20 |
+| train_spider | 7000 | 140 |
+| train_others | 1659 | 6 |
+| test | 2147 | 40 |
+
+归档来源文件的信息见 [spider-manifest.json](data/spider-manifest.json)，随仓库数据的校验值见 [SHA256SUMS](data/SHA256SUMS)。
 
 ```text
 仓库 data/
@@ -154,7 +159,7 @@ CSV 为 UTF-8，字段为 `question,db_id,mode,sql,executed,matched,error`。成
 
 SQLite 文件只读打开；保留 authorizer、query_only、defensive、trusted_schema=OFF、多语句拒绝、函数白名单、查询超时和结果大小上限。合法 JOIN、CTE、聚合和窗口函数可以使用。HTTPS 请求在进程内由 libcurl 发送，校验证书、不跟随重定向，限制时间与解压后的响应大小，密钥不进入日志或命令行。
 
-模型接收问题、表结构和 SQL 执行错误，系统提示词使用中文。程序不上传数据库文件或查询结果行，不支持写数据库。API Key 是使用者的本地配置，不随仓库提供；无需密钥的 `/demo` 始终可用。
+模型接收问题、表结构和 SQL 执行错误，系统提示词使用中文。程序不上传数据库文件或查询结果行，不支持写数据库。API Key 是使用者的本地配置，不随仓库提供。自然语言查询和 Benchmark 都需要有效 API Key。
 
 ```text
 src/
@@ -163,11 +168,13 @@ src/
 ├── database.cpp, agent.cpp  # SQLite、固定纠错
 ├── llm.cpp, json.cpp        # HTTPS、JSON 协议
 ├── benchmark.cpp, files.cpp # CSV 评测、文件读取
-└── cli.cpp, demo.cpp        # 查询输入、演示数据
+└── cli.cpp                  # 查询输入和结果显示
 ```
 
-`main.cpp` 按顺序包含模块，CMake 只编译入口。第三方库自带的头文件保留，版本和校验值见 `third_party/`。随仓库数据由 `.gitignore` 明确放行，本地密钥、用户数据库、解压数据及结果文件继续忽略。GitHub Actions 保留三个平台的构建和离线 Demo。
+`main.cpp` 按顺序包含模块，CMake 只编译入口。第三方库自带的头文件保留，版本和校验值见 `third_party/`。随仓库数据由 `.gitignore` 明确放行，本地密钥、用户数据库、解压数据及结果文件继续忽略。GitHub Actions 保留三个平台的构建和启动帮助检查。
 
-文档总入口见 [文档导航](docs/README.md)。当前实际验证见 [验证记录](docs/verification/current.md)，更多执行细节见 [技术说明](docs/guides/design.md)。当前展示材料见 [项目报告](docs/report/project-report.md)、[PDF 打印版](docs/report/project-report.pdf) 和 [7 页汇报提纲](docs/report/presentation-outline.md)，内容对应 C++17、cJSON 与固定纠错流程。
+查询结果的行数组按请求上限一次分配，单元格按实际行读取；`execute_sql` 的结果使用完后调用 `free_query`，连接使用完后调用 `close_database`。JSON 读取接口集中在 `src/json.cpp`，操作系统路径接口集中在 `src/files.cpp`。
 
-项目 MIT；SQLite 为公有领域，cJSON 为 MIT，libcurl 使用 curl license。
+项目使用说明统一保留在本 README。其他说明、报告和 PDF 仅在本地保留，并由 `.gitignore` 排除。
+
+项目采用 [MIT 许可证](LICENSE)；SQLite 为公有领域，cJSON 为 [MIT](third_party/cjson/LICENSE)，libcurl 使用 curl license。第三方源码的校验值见 [third_party/SHA256SUMS](third_party/SHA256SUMS)。

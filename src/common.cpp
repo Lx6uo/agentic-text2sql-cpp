@@ -93,8 +93,6 @@ struct ConfigResult {
 };
 struct Completion {
     ApiOptions api;
-    bool mock = false;
-    int mock_step = 0;
     cJSON *messages = nullptr;
 };
 struct QueryRun {
@@ -141,7 +139,6 @@ struct OutputFile {
 struct Args {
     bool success = false;
     bool help = false;
-    bool demo = false;
     bool benchmark = false;
     bool config_required = false;
     bool db_given = false;

@@ -5,7 +5,6 @@ void print_error(string error) {
 void print_help() {
     cout << "用法：text2sql [--config 配置文件] [--db SQLite文件]\n"
          << "      text2sql [--config 配置文件] benchmark\n"
-         << "      text2sql [--config 配置文件] demo\n"
          << "默认直接输入自然语言；/help 查看引导，/exit 退出。\n";
 }
 Args parse_arguments(int argc, char **argv) {
@@ -14,12 +13,6 @@ Args parse_arguments(int argc, char **argv) {
         string value = argv[i];
         if (value == "--help" || value == "-h") {
             args.help = true;
-        } else if (value == "demo") {
-            if (args.demo) {
-                args.error = "重复参数：demo";
-                return args;
-            }
-            args.demo = true;
         } else if (value == "benchmark") {
             if (args.benchmark) {
                 args.error = "重复参数：benchmark";
@@ -55,18 +48,8 @@ Args parse_arguments(int argc, char **argv) {
             return args;
         }
     }
-    bool invalid = false;
-    if (args.demo && args.benchmark) {
-        invalid = true;
-    }
-    if (args.db_given && args.demo) {
-        invalid = true;
-    }
     if (args.db_given && args.benchmark) {
-        invalid = true;
-    }
-    if (invalid) {
-        args.error = "--db 只用于自然语言查询，demo 和 benchmark 不能同时使用";
+        args.error = "--db 只用于自然语言查询，不用于 benchmark";
         return args;
     }
     args.success = true;
@@ -171,25 +154,6 @@ void print_result(QueryRun *result) {
     }
     cout << "--------------------------------\n";
 }
-bool run_demo(Config *config) {
-    Database db;
-    Status opened = create_demo_database(&db, demo_sql, config->database);
-    if (!opened.success) {
-        print_error(opened.error);
-        return false;
-    }
-    cout << "离线 Demo（Mock AI，结果由真实 SQLite 执行）\n";
-    Completion source;
-    source.mock = true;
-    QueryRun result =
-        run_query(&db, "查询平均工资最高的三个部门", &source, query_limit(&config->agent));
-    print_result(&result);
-    cout << "SQL 尝试次数：" << result.attempts << '\n';
-    bool success = result.success;
-    free_query(&result.query);
-    close_database(&db);
-    return success;
-}
 void print_stats(string name, BenchmarkStats *stats) {
     double executed = 0;
     double matched = 0;
@@ -248,7 +212,7 @@ void print_guide(string table) {
     if (!table.empty()) {
         cout << "例如：查询「" << display_text(table) << "」表的记录总数。\n";
     }
-    cout << "输入 /demo 体验离线纠错，/help 查看引导，/exit 退出。\n\n";
+    cout << "输入 /help 查看引导，/exit 退出。\n\n";
 }
 int run_chat(Config *config, string path) {
     ApiOptions *api = &config->api;
@@ -278,7 +242,7 @@ int run_chat(Config *config, string path) {
     cout << "已连接：" << path << "\n";
     print_guide(example);
     if (api->api_key.empty()) {
-        cout << "可先输入 /demo 离线体验；任意自然语言查询请配置自己的 AI 密钥。\n";
+        cout << "请在 JSON 配置或 DEEPSEEK_API_KEY 中配置自己的 AI 密钥。\n";
     }
     while (!cancelled) {
         string question = ask_text("你：");
@@ -295,9 +259,8 @@ int run_chat(Config *config, string path) {
             print_guide(example);
             continue;
         }
-        if (question == "/demo") {
-            run_demo(config);
-            cout << '\n';
+        if (question[0] == '/') {
+            print_error("未知命令，仅支持 /help 和 /exit");
             continue;
         }
         if (api->api_key.empty()) {

@@ -15,8 +15,8 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel
-      - name: Offline demo
-        run: ./build/text2sql demo
+      - name: Startup help
+        run: ./build/text2sql --help
 
   macos:
     runs-on: macos-latest
@@ -28,8 +28,8 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix curl)"
       - name: Build
         run: cmake --build build --parallel
-      - name: Offline demo
-        run: ./build/text2sql demo
+      - name: Startup help
+        run: ./build/text2sql --help
 
   windows:
     runs-on: windows-latest
@@ -47,6 +47,6 @@ jobs:
       - name: Build
         shell: pwsh
         run: cmake --build build --config Release --parallel
-      - name: Offline demo
+      - name: Startup help
         shell: pwsh
-        run: .\build\Release\text2sql.exe demo
+        run: .\build\Release\text2sql.exe --help

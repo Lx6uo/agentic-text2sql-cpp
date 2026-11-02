@@ -1,6 +1,5 @@
 // 主流程：读取 JSON 配置，直接进入自然语言查询。
 #include "common.cpp"
-#include "demo.cpp"
 #include "json.cpp"
 #include "files.cpp"
 #include "database.cpp"
@@ -55,25 +54,15 @@ int application_main(int argc, char **argv) {
     if (args.benchmark) {
         return run_benchmark_prompt(config);
     }
-    if (!args.demo) {
-        string path = config->database_path;
-        if (args.db_given) {
-            path = args.db;
-        } else if (path.empty()) {
-            if (config->bundled_data.empty() == false) {
-                path = join_path(config->bundled_data, "company.sqlite");
-            }
+    string path = config->database_path;
+    if (args.db_given) {
+        path = args.db;
+    } else if (path.empty()) {
+        if (config->bundled_data.empty() == false) {
+            path = join_path(config->bundled_data, "company.sqlite");
         }
-        return run_chat(config, path);
     }
-    bool success = run_demo(config);
-    if (cancelled) {
-        return 130;
-    }
-    if (success) {
-        return 0;
-    }
-    return 1;
+    return run_chat(config, path);
 }
 #ifdef _WIN32
 TextResult to_utf8(const wchar_t *value) {

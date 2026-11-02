@@ -99,7 +99,6 @@ config.*.local.json
 *~
 
 # Data shipped with the repository
-!/data/README.md
 !/data/SHA256SUMS
 !/data/spider.zip
 !/data/spider-manifest.json
@@ -112,3 +111,20 @@ config.*.local.json
 !/data/sample-spider/database/company/
 /data/sample-spider/database/company/*
 !/data/sample-spider/database/company/company.sqlite
+
+# Keep only the root README as repository documentation
+/docs/
+*.md
+*.MD
+*.markdown
+*.rst
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.txt
+!CMakeLists.txt
+!**/LICENSE*
+!**/COPYING*
+!/README.md

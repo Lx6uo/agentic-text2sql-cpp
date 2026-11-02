@@ -1,4 +1,4 @@
-// HTTPS 请求和 SQL 回复。没有工具调用协议或 token 统计。
+// HTTPS 请求和 SQL 回复。
 const int response_limit = 2 * 1024 * 1024;
 struct ResponseBuffer {
     char *data = nullptr;
@@ -209,7 +209,6 @@ Status add_message(Completion *source, string role, string text) {
 }
 Status start_completion(Completion *source, string system, string input) {
     close_completion(source);
-    source->mock_step = 0;
     source->messages = json_array();
     Status result = add_message(source, "system", system);
     if (result.success) {
@@ -223,21 +222,6 @@ Status start_completion(Completion *source, string system, string input) {
 TextResult request_sql(Completion *source) {
     if (cancelled) {
         return failed_text("查询已取消");
-    }
-    if (source->mock) {
-        TextResult result;
-        result.success = true;
-        int step = source->mock_step;
-        source->mock_step++;
-        if (step == 0) {
-            result.text =
-                "SELECT department_name, AVG(salary) FROM employees GROUP BY department_name";
-        } else {
-            result.text = "SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary "
-                          "FROM employees e JOIN departments d ON e.department_id=d.id GROUP BY "
-                          "d.id,d.name ORDER BY average_salary DESC LIMIT 3";
-        }
-        return result;
     }
     TextResult request = sql_request_json(source);
     if (request.success == false) {

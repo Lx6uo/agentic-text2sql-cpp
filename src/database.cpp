@@ -208,35 +208,6 @@ Status open_database(Database *db, string path, DatabaseOptions options) {
     install_database(db, &opened);
     return ok_status();
 }
-Status create_demo_database(Database *db, string sql, DatabaseOptions options) {
-    Database opened;
-    opened.options = options;
-    int code =
-        sqlite3_open_v2(":memory:", &opened.connection,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nullptr);
-    if (code != SQLITE_OK) {
-        close_database(&opened);
-        return failed_status("Cannot open demo database");
-    }
-    char *error = nullptr;
-    code = sqlite3_exec(opened.connection, sql.c_str(), nullptr, nullptr, &error);
-    if (code != SQLITE_OK) {
-        string message = "Demo initialization failed";
-        if (error != nullptr) {
-            message = error;
-        }
-        sqlite3_free(error);
-        close_database(&opened);
-        return failed_status(message);
-    }
-    Status result = configure_database(&opened);
-    if (!result.success) {
-        close_database(&opened);
-        return result;
-    }
-    install_database(db, &opened);
-    return ok_status();
-}
 Cell read_cell(sqlite3_stmt *statement, int column) {
     Cell result;
     result.type = sqlite3_column_type(statement, column);

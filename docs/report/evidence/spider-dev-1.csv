@@ -1,3 +1,0 @@
-question,db_id,mode,sql,executed,matched,error
-"How many singers do we have?","concert_singer",baseline,"SELECT COUNT(*) FROM ""singer"";",1,1,""
-"How many singers do we have?","concert_singer",corrected,"SELECT COUNT(*) FROM ""singer"";",1,1,""
