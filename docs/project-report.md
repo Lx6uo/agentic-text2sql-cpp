@@ -79,6 +79,100 @@ Spider 1.0 原始论文包含 10181 个问题、5693 条 SQL、200 个数据库�
 
 默认 SQL 超时为 5000 ms，本地读取上限为 100 行、约 1 MiB 结果；分析默认预览 10 行并标记截断。SQLite 只读授权与资源控制由程序执行。基础类型检查和资源释放保留，错误集中为少量类别提示。
 
+### 3.1 重点代码：查询主流程
+
+以下节选来自当前源码。主流程为突出正常查询路径，省略了三处失败返回分支；其他代码块保留所选段落的原写法。函数内部片段依赖所在函数的变量，完整实现可通过各节的源码链接阅读。
+
+来源：[src/agent.cpp：run_query](../src/agent.cpp)。
+
+```cpp
+TextResult schema = read_schema(db);
+// ... 省略结构读取失败的返回分支
+Status setup = start_completion(source, system_prompt,
+                                "问题：" + question + "\n数据库结构：\n" + schema.text);
+// ... 省略上下文构建失败的返回分支
+TextResult reply = request_text(source);
+close_completion(source);
+// ... 省略请求失败的返回分支
+result = execute_reply(db, reply.text);
+if (result.success && with_analysis) {
+    DatabaseOptions *options = &db->options;
+    result.analysis =
+        analyze_result(question, &result.query, source, options->max_preview_rows);
+}
+```
+
+**讲解重点：** `read_schema` 取得真实结构，`start_completion` 填充生成 SQL 的提示词，`request_text` 调用模型，`execute_reply` 识别标记或执行 SQL。最后仅在查询成功且允许分析时调用 `analyze_result`。交互查询传入 `with_analysis=true`，Benchmark 传入 false；两种入口共用同一条 SQL 生成与执行流程。
+
+### 3.2 重点代码：打包 API 请求与获取回复
+
+来源：[src/llm.cpp：request_text](../src/llm.cpp)，JSON 打包和回复解析的完整实现位于 [src/json.cpp](../src/json.cpp)。
+
+```cpp
+TextResult request = model_request_json(source);
+if (request.success && request.text.length() <= 524288) {
+    TextResult response = curl_post(&source->api, request.text);
+    if (response.success) {
+        result = read_model_response(response.text);
+    }
+}
+```
+
+**讲解重点：** `model_request_json` 将模型名称、system/user 消息和请求选项打包成 JSON；`curl_post` 在进程内发送 HTTPS；`read_model_response` 取出回复文字。这段代码同时用于 SQL 生成和结果分析，请求 JSON 上限为 512 KiB，失败信息在函数出口统一处理。
+
+### 3.3 重点代码：SQLite 逐行执行
+
+来源：[src/database.cpp：execute_sql](../src/database.cpp)。片段位于 `while (ready)` 的读取循环内。
+
+```cpp
+int code = sqlite3_step(statement);
+if (code == SQLITE_DONE) {
+    result.success = true;
+    break;
+}
+if (code != SQLITE_ROW) {
+    break;
+}
+```
+
+**讲解重点：** `sqlite3_step` 每次返回一行；遇到 `SQLITE_DONE`，说明结果已读完，可以标记成功；其他非行状态结束读取，交给统一失败处理。取得行后，后续代码用简单指针保存单元格，并检查行数和结果大小。只读授权、语句准备、超时和资源释放保留在完整函数中。
+
+### 3.4 重点代码：独立分析上下文
+
+来源：[src/agent.cpp：analyze_result](../src/agent.cpp)。以下为完整函数。
+
+```cpp
+TextResult analyze_result(string question, QueryResult *query, Completion *source, int row_limit) {
+    string input = "问题：" + question + "\nSQL：\n" + query->sql + "\n";
+    input += result_preview(query, row_limit);
+    // 分析使用独立提示词，不沿用第一次请求的“只返回 SQL”要求。
+    Status setup = start_completion(source, analysis_prompt, input);
+    if (setup.success == false) {
+        return failed_text("API");
+    }
+    TextResult result = request_text(source);
+    close_completion(source);
+    return result;
+}
+```
+
+**讲解重点：** 输入由当前问题、已执行 SQL 和 `result_preview` 组成，分析使用独立的 `analysis_prompt`。返回的 `TextResult` 保存在 `QueryRun.analysis` 中，查询数据则在 `QueryRun.query` 中；这样分析请求失败也能继续展示已有 SQL 和结果。
+
+### 3.5 重点代码：无效输入标记拦截
+
+来源：[src/agent.cpp：execute_reply](../src/agent.cpp)。该判断位于 SQL 执行之前。
+
+```cpp
+if (sql.text == invalid_query_marker) {
+    // 无效输入到这里就结束，避免执行占位 SQL。
+    result.invalid_input = true;
+    result.error = invalid_query_hint;
+    return result;
+}
+```
+
+**讲解重点：** 模型按提示词返回固定标记后，这里直接结束查询。CLI 根据 `invalid_input` 显示固定引导；该分支不会进入 `execute_sql`，也不会请求结果分析。有效查询内容中包含 help/exit 时，仍可按普通 SQL 路径处理。
+
 ## 4. 运行效果与示例
 
 ### 4.1 学生人数查询
@@ -135,7 +229,26 @@ student 表共有 2000 名学生。
 
 CSV 字段为 `question,db_id,sql,executed,matched,error`。`executed=1` 表示预测执行成功；`matched=1` 表示结果一致，`0` 表示可比较但不一致，留空表示未形成比较结论。两个比率的分母均为实际尝试题数。完整算法与停止规则见[技术文档](design-and-implementation.md#7-手动-benchmark-与结果比较)。
 
-### 5.2 已完成的功能验证
+### 5.2 重点代码：按列比较真实结果
+
+来源：[src/benchmark.cpp：equivalent_results](../src/benchmark.cpp)。片段位于逐行比较循环内；`left`、`right` 是当前比较使用的行号数组。
+
+```cpp
+for (int c = 0; c < prediction->column_count; c++) {
+    QueryRow *predicted_row = &prediction->rows[left[r]];
+    QueryRow *reference_row = &gold->rows[right[r]];
+    Cell *predicted_cell = &predicted_row->cells[c];
+    Cell *reference_cell = &reference_row->cells[c];
+    if (cell_equal(predicted_cell, reference_cell) == false) {
+        equal = false;
+        break;
+    }
+}
+```
+
+**讲解重点：** 通过局部的行指针和单元格指针，逐列比较预测与标准结果。`cell_equal` 处理 SQLite 类型与数值容差；任意一列不一致，就将本次比较标记为不一致。外层 ORDER BY 决定比较前是否排序行号，重复记录仍按出现次数保留。
+
+### 5.3 已完成的功能验证
 
 以下汇总本次实现过程中已有的手工验证记录。本轮文档整理核对了源码、数据库和现存结果文件，没有新增自动 Benchmark。
 
@@ -164,16 +277,16 @@ Windows 与 Linux 的构建配置、Windows 中文参数适配和三平台 CI �
 
 ## 7. 现场汇报提纲与演示安排
 
-以下提纲可直接用于七页 PPT，建议总时长 3～5 分钟。
+以下提纲可直接用于七页 PPT，建议总时长 3～5 分钟。现场优先展示 3.1 主流程，再选 3.3 SQL 执行或 3.5 标记拦截作补充；其余节选可用于答辩时解释实现细节。
 
 | 页 | 主题 | 展示与讲述内容 |
 |---:|---|---|
 | 1 | 任务与数据集 | Text-to-SQL 输入输出、Spider 范围、college_2 的 11 张表 |
 | 2 | 项目目标 | C++17、基础函数与指针、真实模型和数据库、clone 后数据可用 |
-| 3 | 固定五步流程 | 结构填充→生成 SQL→执行→分析→CLI 输出，两次 API 各自负责什么 |
-| 4 | 执行与资源控制 | SQLite 只读、单条语句、超时、结果与预览上限、统一错误 |
+| 3 | 固定五步流程 | 展示 3.1 主流程节选，说明两次 API 各自负责什么 |
+| 4 | 执行与资源控制 | 结合 3.3 执行或 3.5 标记拦截节选，说明只读、超时、上限和统一错误 |
 | 5 | 现场查询效果 | 学生人数、多表选课 Top-5、分开的 SQL/结果/分析、无效输入提示 |
-| 6 | 手动评测与验证 | CSV 字段、执行成功与结果一致的区别、两题样例的评价范围 |
+| 6 | 手动评测与验证 | 结合 5.2 比较节选，说明 CSV 字段、执行成功与结果一致的区别 |
 | 7 | 结论与后续评价 | 已完成查询和分析流程，继续用更大样本检查语义及分析质量 |
 
 演示前按 README 构建并配置 API Key。启动后确认连接 college_2，先查询学生总人数，再查询选课记录 Top-5，最后输入裸 `help` 展示固定提示。现场可连续输入完整问题；手动评测需要单独启动，并使用新的 CSV 路径，避免覆盖已有结果。
