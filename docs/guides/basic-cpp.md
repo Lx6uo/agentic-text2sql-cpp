@@ -9,13 +9,21 @@
 先从 `agent.cpp` 的 `run_query` 阅读：
 
 ```cpp
-for (int i = 0; i < attempts && !cancelled; i++) {
+for (int i = 0; i < attempts; i++) {
+    if (cancelled) {
+        break;
+    }
     TextResult sql = request_sql(source);
-    if (!sql.success) break;
+    if (sql.success == false) {
+        break;
+    }
 
     free_query(&result.query);
     result.query = execute_sql(db, sql.text);
-    if (result.query.success) break;
+    QueryResult* query = &result.query;
+    if (query->success) {
+        break;
+    }
 
     add_message(source, "user", "执行失败，请修正上一条 SQL。");
 }
@@ -29,8 +37,11 @@ AI 只返回 SQL。表结构由程序提前读取，不再让模型选择工具�
 
 ```cpp
 QueryResult result = execute_sql(&db, "SELECT name FROM employees");
-if (result.success) print_table(&result);
-else cout << result.error << endl;
+if (result.success) {
+    print_table(&result);
+} else {
+    cout << result.error << endl;
+}
 free_query(&result);
 ```
 
@@ -44,7 +55,17 @@ free_query(&result);
 | `run_query` 的最终查询结果 | `free_query(&result.query)` |
 | SQLite 连接 | `close_database(&db)` |
 
-`new(nothrow)` 分配失败返回空指针，`delete[]` 释放数组。查询扩容只复制行的指针，Benchmark 用归并排序排序行号，不复制整行字符串。
+行索引数组按本次行数上限一次分配，不再扩容或搬移；每行单元格按实际读取的数据分配。这样保留本地查询和十万行评测能力，又不提前创建海量单元格。`new(nothrow)` 和 `delete[]` 只用于必要的分配、释放；单次初始分配仍可能失败，函数会返回错误。
+
+多层访问拆成容易理解的局部指针：
+
+```cpp
+QueryRow* row = &result->rows[r];
+Cell* cell = &row->cells[c];
+cout << cell_text(cell);
+```
+
+Benchmark 用归并排序排序行号，不复制整行字符串。
 
 ## 文件分工
 
@@ -66,9 +87,20 @@ free_query(&result);
 
 ## 写法约定
 
-短判断可以写成 `if (!valid) return result;`；多步操作仍使用大括号分行。自写代码不使用类定义、引用参数、异常、模板定义、Lambda、智能指针、`vector/map/set`、`auto`、三元表达式或 `.get<T>()`。
+变量分别声明，所有 `if/else/for/while` 使用大括号分行。复杂条件拆成小步骤，基础 `&&` 和 `||` 仍用于简单的两项判断。自写代码不使用类定义、引用参数、异常、模板定义、Lambda、智能指针、`vector/map/set`、`auto`、三元表达式或 `.get<T>()`。
 
-JSON 配置和网络协议使用 cJSON 的 C 接口；Windows 保留原来的宽字符参数转 UTF-8 和控制台适配。所有启动和演示命令见 README。
+JSON 的底层库操作集中在 `json.cpp`。配置和数据集读取使用 `read_json_string()`、`read_json_number()` 等普通函数：
+
+```cpp
+TextResult value = read_json_string(object, "model");
+if (value.success) {
+    model = value.text;
+} else {
+    cout << value.error << endl;
+}
+```
+
+业务路径用字符串和 `join_path()` 拼接，路径规范化和中文跨平台细节保留在 `files.cpp`。类型转换及 `#ifdef _WIN32` 等条件编译按用户选择保留，Windows 参数和控制台适配不变。启动命令见 README。
 
 默认启动显示自然语言输入和引导，数据库从 `--db` 或 JSON 的 `database.path` 连接；未提供时默认连接随仓库提供的样例数据库。`/demo` 离线体验，`/help` 查看引导，`/exit` 退出。Benchmark 和 Demo 使用独立启动命令，见 README。
 

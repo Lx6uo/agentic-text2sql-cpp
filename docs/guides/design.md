@@ -18,15 +18,15 @@ AI 输入不含标准答案 SQL 或查询结果行。系统提示词将数据库
 
 内部 Schema 查询只使用固定 SQL 和转义后的真实表名，临时放行 authorizer，随后恢复。查询准备、执行和结果读取都受截止时间约束，progress handler 检查取消和超时。SQL 长度、表达式、列数、单值和总结果均有限制；截断标记保留，错误清除不完整行。
 
-查询结果保留 SQLite 类型、整数、小数、文本、NULL 和 BLOB。动态数组通过普通指针传递，调用方显式释放；结构体不定义构造/析构函数或成员函数。
+查询结果保留 SQLite 类型、整数、小数、文本、NULL 和 BLOB。行索引数组按请求的上限一次分配，不再动态扩容；单元格按实际读取行分配。数组通过普通指针传递，调用方显式释放；结构体不定义构造/析构函数或成员函数。
 
 ## JSON 配置、HTTP 与 Windows
 
 配置支持 api、agent、database 三个部分，字段类型与范围被检查，环境变量优先于文件，包括空环境变量。`database.path` 指定启动数据库，相对路径以配置目录为基准；`--db` 参数优先。未指定时连接内置样例库；默认数据优先从程序旁边查找，支持 Windows 多配置构建和安装布局，最后回退到构建目录。错误不输出 JSON 内容或密钥。
 
-libcurl 在进程内发送 HTTPS，禁止重定向，校验证书链和主机名，限制连接时间、总时间和解压后 2 MB 响应，忽略 netrc，并检查取消。认证头仅在内存中，不进入 argv、临时文件或日志；API 错误正文不输出。JSON 由固定版本 cJSON 处理。
+libcurl 在进程内发送 HTTPS，禁止重定向，校验证书链和主机名，限制连接时间、总时间和解压后 2 MB 响应，忽略 netrc，并检查取消。认证头仅在内存中，不进入 argv、临时文件或日志；API 错误正文不输出。JSON 由固定版本 cJSON 处理，库操作集中在 `json.cpp`；配置、数据集和回复解析调用简单的读取接口。
 
-Windows 使用 CommandLineToArgvW 和 WideCharToMultiByte，把原生 UTF-16 参数转为 UTF-8，并设置 UTF-8 控制台。文件流使用 C++17 filesystem，SQLite 接收 UTF-8 路径；MSVC、Shell32、vcpkg 静态 curl 和静态运行库配置保留。
+Windows 使用 CommandLineToArgvW 和 WideCharToMultiByte，把原生 UTF-16 参数转为 UTF-8，并设置 UTF-8 控制台。业务路径以字符串拼接，C++17 filesystem 的平台操作集中在 `files.cpp`，SQLite 接收 UTF-8 路径；MSVC、Shell32、vcpkg 静态 curl 和静态运行库配置保留。
 
 ## CSV Benchmark
 

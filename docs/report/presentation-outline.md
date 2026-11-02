@@ -2,7 +2,7 @@
 
 > 用途：制作 PPT 和安排现场演示。完整内容见 [项目报告](project-report.md) 或 [PDF](project-report.pdf)。
 
-对应 `docs/report/project-report.md` 与配套 PDF，源码基准 `9ae5440`。主题为 C++17、cJSON、固定 SQL 纠错和 SQLite 真实执行。
+对应 `docs/report/project-report.md` 与配套 PDF，源码基准 `be7949b`。主题为 C++17、cJSON、固定 SQL 纠错和 SQLite 真实执行。
 
 | 页 | 标题 | 放什么 | 讲述重点 |
 |---:|---|---|---|

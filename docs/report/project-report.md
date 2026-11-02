@@ -1,7 +1,7 @@
 # 基于 C++17 与固定纠错的 SQLite 自然语言查询系统
 
 > **当前版本项目报告 · 汇报建议 3～5 分钟**<br>
-> 源码基准：`9ae5440`；报告更新：2026-11-02。<br>
+> 源码基准：`be7949b`；报告更新：2026-11-02。<br>
 > 项目地址：https://github.com/Lx6uo/agentic-text2sql-cpp
 
 **摘要：** 面向 Spider 1.0 的跨数据库 Text-to-SQL 任务，本项目采用 C++17、SQLite、cJSON 和 libcurl，实现从自然语言问题到只读 SQL 查询的轻量终端工具。程序先读取真实数据库结构，再请求 AI 生成 SQL；执行失败时反馈 SQLite 错误，总共最多尝试三次。项目保留 JSON 配置与 Windows/macOS/Linux 适配，内置样例库和完整运行数据，并提供 Baseline/固定纠错的 CSV 对照评测。当前验证用于确认构建、查询、纠错、数据包装与评价流程；尚不能据此判断完整 Spider 准确率或纠错策略的统计收益。

@@ -2,9 +2,18 @@
 
 > 用途：记录当前版本已经实际验证的内容。旧版本记录已移至 [历史归档](../archive/verification-history.md)；报告的原始 CSV 和校验清单见 [报告证据](../report/evidence/README.md)。
 
+## 当前语法简化回归（源码 be7949b）
+
+按用户选择展开变量和条件、多层指针访问，行索引按上限一次分配，业务路径和 JSON 读取改成简单接口；类型转换和平台条件编译保留。
+
+- ASan/UBSan 下 **70 项检查通过**，包括十万行容量、超出一行时截断、非二次幂行数排序、空结果、JSON 字段类型、只读限制、超时和纠错；没有 sanitizer 错误。
+- **10 项命令行和配置检查通过**，包括中文相对路径、参数冲突、错误配置和敏感值不输出。
+- 两题内置样例与一题官方 dev 在 Baseline 和纠错模式下均执行成功并匹配标准结果。原始 CSV 已更新到 `docs/report/evidence/`，模型、源码基准及校验值记录在 manifest。
+- 查询和 Benchmark 上限保留。必要的初始内存分配仍使用 `new(nothrow)`；程序不再扩容行索引数组。
+
 ## 当前展示材料与报告回归（2026-11-02）
 
-[当前报告](../report/project-report.md)、[四页 PDF](../report/project-report.pdf) 和 [汇报提纲](../report/presentation-outline.md) 已围绕源码基准 `9ae5440` 重新整理，技术栈为 C++17、SQLite、cJSON 和 libcurl，流程为读取结构后生成 SQL、最多三次执行与纠错。报告中的 20 题动态 Agent 指标已移出当前性能结论。
+[当前报告](../report/project-report.md)、[四页 PDF](../report/project-report.pdf) 和 [汇报提纲](../report/presentation-outline.md) 已围绕源码基准 `be7949b` 重新整理，技术栈为 C++17、SQLite、cJSON 和 libcurl，流程为读取结构后生成 SQL、最多三次执行与纠错。报告中的 20 题动态 Agent 指标已移出当前性能结论。
 
 本次在源码目录外构建当前程序，核对离线 Demo 的 SQL/结果分区与两次尝试，并重新执行两题内置中文样例和官方 Spider dev 第一题。Baseline 与固定纠错两种模式在两组中均执行成功并匹配标准结果。原始 CSV、模型名、源码基准和文件 SHA-256 保存在 `docs/report/evidence/`。
 

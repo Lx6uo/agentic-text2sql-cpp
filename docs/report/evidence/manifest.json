@@ -1,11 +1,11 @@
 {
-  "source_commit": "9ae5440",
+  "source_commit": "be7949b",
   "date": "2026-11-02",
   "model": "deepseek-flash",
-  "purpose": "Current fixed-correction functional regression, not full Spider accuracy",
+  "purpose": "Readable-syntax refactor regression; query and benchmark limits preserved",
   "evidence": {
     "sample.csv": {
-      "sha256": "4d52a61d090cc391daa34ce5027e023e6cf1c77cd83d5acd356f1434d4460198",
+      "sha256": "709b1414a85b7f8e19c3ac4daf81dff2f5fe6e17b2657da05133028216ac5456",
       "csv_rows": 4,
       "modes": {
         "baseline": {
@@ -38,8 +38,8 @@
     }
   },
   "report": {
-    "markdown_sha256": "9b6a64a46fac73b2bf6c6107637f09d3c0c61a45f9eeaf4cdaaadf850c574e6a",
-    "pdf_sha256": "5fcd225a27a25f60b06794d2dc032ca1ddca5016eb20d1d61a4852e065260819",
+    "markdown_sha256": "224d3c4ad5e8c74081067a992c7927fef9e03dd9f7cbf8fd5713c512252911c6",
+    "pdf_sha256": "c133f932cb65b6df0548d1d54e6391666147b6e291734cedb7084a6b301dc271",
     "pdf_pages": 4,
     "markdown_path": "../project-report.md",
     "pdf_path": "../project-report.pdf"
