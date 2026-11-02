@@ -1,6 +1,11 @@
 @page {
   size: A4;
   margin: 14mm 14mm 16mm;
+  @bottom-center {
+    content: counter(page) " / " counter(pages);
+    color: #64748b;
+    font-size: 8pt;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -132,6 +137,14 @@ hr {
 }
 
 img, svg { max-width: 100%; }
+
+.page-break {
+  break-before: page;
+  page-break-before: always;
+  height: 0;
+  margin: 0;
+  padding: 0;
+}
 
 @media print {
   a { color: #174f8f; }

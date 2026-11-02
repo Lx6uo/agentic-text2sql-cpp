@@ -1,0 +1,47 @@
+{
+  "source_commit": "9ae5440",
+  "date": "2026-11-02",
+  "model": "deepseek-flash",
+  "purpose": "Current fixed-correction functional regression, not full Spider accuracy",
+  "evidence": {
+    "sample.csv": {
+      "sha256": "4d52a61d090cc391daa34ce5027e023e6cf1c77cd83d5acd356f1434d4460198",
+      "csv_rows": 4,
+      "modes": {
+        "baseline": {
+          "cases": 2,
+          "executed": 2,
+          "matched": 2
+        },
+        "corrected": {
+          "cases": 2,
+          "executed": 2,
+          "matched": 2
+        }
+      }
+    },
+    "spider-dev-1.csv": {
+      "sha256": "73f957f3096ef92b81f88d51961395b0f4d534972c17e21cc5e648c278fdde18",
+      "csv_rows": 2,
+      "modes": {
+        "baseline": {
+          "cases": 1,
+          "executed": 1,
+          "matched": 1
+        },
+        "corrected": {
+          "cases": 1,
+          "executed": 1,
+          "matched": 1
+        }
+      }
+    }
+  },
+  "report": {
+    "markdown_sha256": "9b6a64a46fac73b2bf6c6107637f09d3c0c61a45f9eeaf4cdaaadf850c574e6a",
+    "pdf_sha256": "5fcd225a27a25f60b06794d2dc032ca1ddca5016eb20d1d61a4852e065260819",
+    "pdf_pages": 4,
+    "markdown_path": "../project-report.md",
+    "pdf_path": "../project-report.pdf"
+  }
+}

@@ -1,0 +1,13 @@
+question,db_id,mode,sql,executed,matched,error
+"查询员工总人数，只返回员工总数。","company",baseline,"SELECT COUNT(*) FROM ""employees"";",1,1,""
+"查询员工总人数，只返回员工总数。","company",corrected,"SELECT COUNT(*) FROM ""employees"";",1,1,""
+"查询每个部门的员工人数，返回部门名称和员工人数，并按部门名称升序排序。","company",baseline,"SELECT d.""name"", COUNT(e.""id"") AS employee_count
+FROM ""departments"" d
+LEFT JOIN ""employees"" e ON e.""department_id"" = d.""id""
+GROUP BY d.""id"", d.""name""
+ORDER BY d.""name"" ASC;",1,1,""
+"查询每个部门的员工人数，返回部门名称和员工人数，并按部门名称升序排序。","company",corrected,"SELECT d.name, COUNT(e.id) AS employee_count
+FROM departments d
+LEFT JOIN employees e ON e.department_id = d.id
+GROUP BY d.id, d.name
+ORDER BY d.name ASC;",1,1,""

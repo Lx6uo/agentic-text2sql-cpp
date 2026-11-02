@@ -2,7 +2,7 @@
 
 使用真实 AI 把自然语言转换成只读 SQLite SQL。程序固定读取表结构、生成 SQL、执行查询；失败后把 SQL 错误交给 AI 修正，总共最多执行三次。启动后直接接收自然语言问题。支持 JSON 配置、Windows/macOS/Linux、离线纠错 Demo，以及 Baseline/纠错模式的 CSV 对照评测。
 
-代码使用普通函数、结构体、数组、判断、循环和适量简单指针。各功能保留独立 CPP，没有自写头文件或测试目录。阅读顺序与指针释放说明见 [基础代码说明](docs/basic-cpp.md)。
+代码使用普通函数、结构体、数组、判断、循环和适量简单指针。各功能保留独立 CPP，没有自写头文件或测试目录。阅读顺序与指针释放说明见 [基础代码说明](docs/guides/basic-cpp.md)。
 
 ## 构建和运行
 
@@ -168,6 +168,6 @@ src/
 
 `main.cpp` 按顺序包含模块，CMake 只编译入口。第三方库自带的头文件保留，版本和校验值见 `third_party/`。随仓库数据由 `.gitignore` 明确放行，本地密钥、用户数据库、解压数据及结果文件继续忽略。GitHub Actions 保留三个平台的构建和离线 Demo。
 
-当前实际验证见 [验证记录](docs/validation.md)，更多执行细节见 [技术说明](docs/design.md)。[历史阶段报告](docs/project-report.md) 与 PDF 记录旧动态工具版本的实验，结果不代表当前固定纠错流程。
+文档总入口见 [文档导航](docs/README.md)。当前实际验证见 [验证记录](docs/verification/current.md)，更多执行细节见 [技术说明](docs/guides/design.md)。当前展示材料见 [项目报告](docs/report/project-report.md)、[PDF 打印版](docs/report/project-report.pdf) 和 [7 页汇报提纲](docs/report/presentation-outline.md)，内容对应 C++17、cJSON 与固定纠错流程。
 
 项目 MIT；SQLite 为公有领域，cJSON 为 MIT，libcurl 使用 curl license。
