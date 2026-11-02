@@ -113,8 +113,8 @@ config.*.local.json
 /data/sample-spider/database/company/*
 !/data/sample-spider/database/company/company.sqlite
 
-# Keep only the root README as repository documentation
-/docs/
+# Keep the root README and the two consolidated project documents
+/docs/*
 *.md
 *.MD
 *.markdown
@@ -129,3 +129,6 @@ config.*.local.json
 !**/LICENSE*
 !**/COPYING*
 !/README.md
+!/docs/
+!/docs/design-and-implementation.md
+!/docs/project-report.md

@@ -1,23 +1,30 @@
 # SQLite 自然语言查询与结果分析
 
-使用真实 AI 把自然语言转换成只读 SQLite SQL。程序读取真实结构、生成并执行一次 SQL，成功后再请求模型分析结果，CLI 分别显示 SQL、查询结果和分析文字。评测通过独立命令手动运行，启动时不会自动评测。支持 JSON 配置、Windows/macOS/Linux 和 CSV 评测。
+使用 C++17、SQLite、cJSON 和 libcurl，将自然语言问题转换成只读 SQL。程序读取真实表结构，生成并执行一次 SQL，成功后再请求模型分析结果；终端分别显示 SQL、查询结果和分析文字。Benchmark 通过独立命令手动运行。
 
-代码使用普通函数、结构体、数组、判断、循环和适量简单指针。变量和控制语句逐步展开，行索引数组一次分配，JSON 与路径细节集中在辅助模块。各功能保留独立 CPP，没有自写头文件或测试目录。
+## 文档入口
 
-## 构建和运行
+项目文档统一保留三份，按用途阅读：
 
-clone 后已经包含 Spider 的大学数据库 `college_2` 和完整 Spider 运行数据，编译后默认连接 `college_2`。它包含 11 张表、2000 名学生、50 名教师和 200 门课程，适合体验多表关联与统计查询。无需额外下载数据或使用 Git LFS。
+| 文档 | 用途 |
+|---|---|
+| [README](README.md) | 安装、配置 API Key、启动查询和手动评测 |
+| [项目设计与技术文档](docs/design-and-implementation.md) | 流程、模块、基础 C++ 与指针、API 协议、数据库控制和评测规则 |
+| [汇报文档](docs/project-report.md) | 数据集背景、项目目标、实现效果、验证结果和现场汇报提纲 |
 
-需要 C++17、CMake ≥ 3.20、libcurl ≥ 7.68。SQLite 3.50.4 和 cJSON 1.7.19 的固定源码随项目提供，CMake 不在线下载依赖。运行不需要 Python、Node.js 或数据库服务器。
+## 构建和启动
+
+仓库直接包含默认数据库 [college_2.sqlite](data/college_2.sqlite)，约 2 MiB，有 11 张表、2000 名学生、50 名教师和 200 门课程。完整 Spider 运行数据也随仓库提供，编译时自动解压，无需另行下载数据或使用 Git LFS。
+
+需要 C++17 编译器、CMake ≥ 3.20 和 libcurl ≥ 7.68。SQLite 3.50.4、cJSON 1.7.19 的固定源码已经包含在仓库中。
 
 ```bash
 cmake -S . -B build
 cmake --build build -j 4
 ./build/text2sql
-./build/text2sql --help
 ```
 
-macOS 使用 Xcode Command Line Tools 自带的编译器和 libcurl，缺少 CMake 时可通过 Homebrew 安装。Ubuntu/Debian：
+macOS 使用 Xcode Command Line Tools 提供的编译器和 libcurl；CMake 可通过 Homebrew 安装。Ubuntu/Debian 安装依赖：
 
 ```bash
 sudo apt-get install cmake g++ libcurl4-openssl-dev
@@ -35,149 +42,79 @@ cmake --build build --config Release --parallel
 .\build\Release\text2sql.exe
 ```
 
-Windows 保留原生 UTF-16 参数转 UTF-8、UTF-8 控制台、中文路径、MSVC 和静态运行库适配。
+构建后直接运行会连接 `college_2` 并显示自然语言输入提示。运行查询需要配置自己的 API Key。
 
-## JSON 配置
+## 配置 API Key 和数据库
 
-复制示例后编辑本地配置：
+复制 [配置示例](config.example.json)，在 `api.api_key` 中填写密钥；`api.model` 和 `api.base_url` 可按模型服务修改。
 
 ```bash
 cp config.example.json config.json
 ```
 
-`config.json` 支持 `api`、`database` 两个部分；可以省略字段并使用默认值。
+默认模型为 `deepseek-flash`，地址为 `https://api.deepseek.com`。默认读取当前目录的可选 `config.json`；通过 `--config` 指定的文件必须存在且为有效配置：
 
-```json
-{
-  "api": {
-    "base_url": "https://api.deepseek.com",
-    "model": "deepseek-flash",
-    "api_key": "",
-    "timeout_seconds": 45,
-    "max_tokens": 2048
-  },
-  "database": {
-    "path": "data/college_2.sqlite",
-    "timeout_ms": 5000,
-    "max_display_rows": 100,
-    "max_preview_rows": 10,
-    "max_sql_bytes": 16384,
-    "max_result_bytes": 1048576
-  }
-}
+```bash
+./build/text2sql --config "配置/我的配置.json"
 ```
 
-也可从 `DEEPSEEK_API_KEY` 环境变量读取密钥。环境变量优先，空环境变量也覆盖文件值。macOS/zsh 可安全输入，不回显且不把密钥写入命令历史：
+也可使用 `DEEPSEEK_API_KEY` 环境变量。环境变量优先于配置文件，空环境变量也会覆盖文件值。macOS/zsh 可这样输入，密钥不会回显或进入命令历史：
 
 ```bash
 read -rs DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY
 ```
 
-默认读取当前目录的可选 `config.json`。指定配置：
-
-```bash
-./build/text2sql --config "配置/我的配置.json"
-```
-
-指定文件不存在或配置非法时会报错。配置和环境文件已被 `.gitignore` 排除；错误信息不会输出配置内容或密钥。
-
-每个问题只生成并执行一次 SQL，不自动纠错。旧配置里的 `agent` 字段不再使用，可以删除。`database.max_preview_rows` 控制发送给分析模型的结果预览行数，默认 10；长值和过大的预览会截断并标记。
-
-## 直接输入自然语言
-
-启动后显示已连接数据库、示例问题和输入提示：
-
-```text
-SQLite 自然语言查询
-已连接：college_2.sqlite
-直接输入问题并按回车，每次查询后可以继续提问。
-例如：查询「advisor」表的记录总数。
-输入 /help 查看引导，输入 /exit 退出。
-
-你：查询教师平均工资最高的院系
-```
-
-数据库可以在 JSON 的 `database.path` 中配置，或通过 `--db` 指定，参数优先：
+数据库路径的优先级为：`--db` 参数 → JSON 中的 `database.path` → 程序附带的 `college_2.sqlite`。配置中的相对路径以配置文件所在目录为基准。
 
 ```bash
 ./build/text2sql --db "data/college_2.sqlite"
 ```
 
-配置中的相对数据库路径以配置文件所在目录为基准。没有提供路径时，默认连接随程序构建的 `college_2.sqlite`，随后持续接收自然语言问题。已连接的数据库在整个会话中保留，每个问题重新建立 AI 上下文；查询结果或错误显示后继续提示 `你：`。
+本地配置和环境文件由 `.gitignore` 排除；真实密钥不随仓库提供。各配置字段的默认值和作用见[技术文档](docs/design-and-implementation.md#5-json-配置与-api-请求)。
 
-输入 `/help` 查看引导，`/exit` 退出。单独输入 `help`、`exit`、问候或无查询意图内容，会由模型按系统提示词返回内部固定标记，Agent 捕获后显示统一提示，不执行模型 SQL，也不请求结果分析。含有 help/exit 的有效查询，例如“查询姓名包含 help 的学生”，仍可正常查询。
+## 输入自然语言
 
-要求查看多张表的原始记录时，例如“这两张表内的所有记录”，模型使用一条 SQL 返回“表名”和“记录”两列，每条记录用 JSON 保留所属表的字段和值。这样可以展示字段不同的表，同时保留重复记录；单表和关联查询继续使用普通表格列。显示行数和结果大小仍受配置上限限制。
-
-成功的查询通常有两次 API 请求：第一次生成 SQL，第二次分析有限结果。SQL 执行失败直接报错；分析失败仍显示已有 SQL 和结果，并提示分析暂不可用。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
-
-错误提示集中在 `src/common.cpp`，各模块只判断操作是否成功，在出口清理资源并返回统一提示，最后由 CLI 显示。API 不再通过 `validate_api` 逐项预校验 URL、模型名等字段，请求失败统一提示检查配置或网络。JSON 配置保留基本类型和数值范围检查；SQLite 只读限制、超时和资源释放仍保留。
-
-## Benchmark 和 CSV
-
-完整 Spider 运行数据已包含在 `data/spider.zip`，来源为 [Spider 官方数据](https://yale-lily.github.io/spider)。CMake 配置时自动解压到 `build/data/spider`，其中包含 206 个不重复 SQLite 库、表元信息和标准 SQL。原下载包中的重复数据库合并，题目和数据库内容保留原始字节；上游 README 和引用说明保存在压缩包内。
-
-| 划分 | 题目数 | 数据库数 |
-|---|---:|---:|
-| dev | 1034 | 20 |
-| train_spider | 7000 | 140 |
-| train_others | 1659 | 6 |
-| test | 2147 | 40 |
-
-归档来源文件的信息见 [spider-manifest.json](data/spider-manifest.json)，随仓库数据的校验值见 [SHA256SUMS](data/SHA256SUMS)。
+启动后直接提问，每次查询后可继续输入。可以尝试：
 
 ```text
-仓库 data/
-├── college_2.sqlite        # 默认大学数据库，来自 Spider，保留原始内容
-├── company.sqlite          # 小型样例数据库
-├── sample-spider/          # 2 道中文题及对应数据库
-├── spider.zip             # 约 57 MiB，普通 Git 文件
-├── spider-manifest.json
-└── SHA256SUMS
+查询学生总人数
+查询每个院系的学生人数，按人数从多到少排列
+列出选课记录数量最多的5门课程，显示课程名称和选课记录数
 ```
 
-构建结果中的 `data/` 包含展开后的数据。复制程序时同时复制旁边的 `data/`；安装时程序和数据会一起安装。
+`/help` 显示引导，`/exit` 退出。单独输入 `help`、`exit`、问候或其他无查询意图的内容时，模型按系统提示词返回固定标记，程序捕获后显示统一提示。含有 help/exit 的有效数据查询仍可执行。
 
-通过独立命令启动评测，数据集目录留空使用内置完整 Spider，再输入划分（默认 dev）、题数（默认 20）和 CSV 路径（留空自动生成）：
+成功查询通常调用两次 API：第一次生成 SQL，第二次分析结果。每个问题重新建立上下文；连续输入适合提出独立问题。
+
+SQL 执行失败会显示统一错误，随后可以继续提问；分析失败仍显示已有 SQL 和查询结果。默认最多读取 100 行、约 1 MiB 结果，发送给分析模型的预览最多 10 行，截断会标记。跨表分别列出原始记录时，模型统一返回“表名”和“JSON 记录”两列，保留各表字段；行数上限适用于整条 SQL。
+
+EOF 正常退出，Ctrl+C 取消请求或 SQL，退出码为 130。
+
+## 手动运行 Benchmark
 
 ```bash
 ./build/text2sql benchmark
-# 指定 JSON 配置
+# 使用指定配置
 ./build/text2sql --config config.json benchmark
 ```
 
-支持 dev、train_spider、train_others 和 test；train 是 train_spider 的别名。
+依次输入数据集目录、划分、题数和 CSV 路径。目录留空使用完整 Spider，划分默认 `dev`，题数默认 20，CSV 路径留空自动生成。支持 `dev`、`train_spider`、`train_others`、`test`，`train` 是 `train_spider` 的别名。
 
-评测只有一种生成方式：每题生成并执行一次 SQL，然后与标准 SQL 的结果比较。评测不调用分析模型，因此每题通常只有一次 API 请求。
-CSV 为 UTF-8，字段为 `question,db_id,sql,executed,matched,error`。成功标记为 1，失败为 0；标准 SQL 失败、评测结果截断或无法比较时，`matched` 留空并记录错误。文本字段正确引用逗号、双引号和换行，已存在的输出文件不会覆盖。
-
-终端汇总实际题数、执行成功率和结果一致率，分母是实际尝试的题数。API 或输出错误会停止评测，并保留已写入的 CSV；请检查实际行数。
-
-结果按列位置比较。标准 SQL 有外层 ORDER BY 时保留顺序，否则排序行号后比较并保留重复行。数值使用相对容差 1e-9，截断结果不判一致。评测最多读取 100000 行/16 MB。标准 SQL 只用于本地比较，不发送给模型。
-
-这是本地结果一致率，不是 Spider 官方 Test Suite Accuracy。
-
-## 执行边界和目录
-
-SQLite 文件只读打开；保留 authorizer、query_only、defensive、trusted_schema=OFF、多语句拒绝、函数白名单、查询超时和结果大小上限。合法 JOIN、CTE、聚合和窗口函数可以使用。HTTPS 请求在进程内由 libcurl 发送，校验证书、不跟随重定向，限制时间与解压后的响应大小，密钥不进入日志或命令行。
-
-生成 SQL 的模型接收问题和真实表结构；分析模型接收问题、已执行 SQL 和有限结果预览，使用独立中文提示词。程序不上传数据库文件，不支持写数据库。API Key 是使用者的本地配置，不随仓库提供。自然语言查询和 Benchmark 都需要有效 API Key。
+快速验证可填写 `build/data/sample-spider`、`dev`、`2` 和一个新的 CSV 路径。每题只生成并执行一次预测 SQL，再与本地标准 SQL 的结果比较；评测不调用结果分析 API。CSV 字段为：
 
 ```text
-src/
-├── main.cpp                 # 启动和 Windows 参数适配
-├── common.cpp, config.cpp   # 结构体、JSON 配置
-├── database.cpp, agent.cpp  # SQLite、查询与分析
-├── llm.cpp, json.cpp        # HTTPS、JSON 协议
-├── benchmark.cpp, files.cpp # CSV 评测、文件读取
-└── cli.cpp                  # 查询输入和结果显示
+question,db_id,sql,executed,matched,error
 ```
 
-`main.cpp` 按顺序包含模块，CMake 只编译入口。第三方库自带的头文件保留，版本和校验值见 `third_party/`。随仓库数据由 `.gitignore` 明确放行，本地密钥、用户数据库、解压数据及结果文件继续忽略。GitHub Actions 保留三个平台的构建和启动帮助检查。
+已有输出文件不会覆盖。终端汇总实际尝试题数、执行成功率和本地结果一致率；比较口径见[技术文档](docs/design-and-implementation.md#7-手动-benchmark-与结果比较)。启动查询程序时不会自动运行评测。
 
-查询结果的行数组按请求上限一次分配，单元格按实际行读取；`execute_sql` 的结果使用完后调用 `free_query`，连接使用完后调用 `close_database`。JSON 读取接口集中在 `src/json.cpp`，操作系统路径接口集中在 `src/files.cpp`。
+## 数据、源码和许可证
 
-项目使用说明统一保留在本 README。其他说明、报告和 PDF 仅在本地保留，并由 `.gitignore` 排除。
+`data/college_2.sqlite` 是默认大学数据库，`data/company.sqlite` 和 `data/sample-spider/` 是小型回归样例，`data/spider.zip` 是完整运行包。来源与范围在[技术文档](docs/design-and-implementation.md#8-数据打包与来源)中统一说明，校验值见 [data/SHA256SUMS](data/SHA256SUMS)。
 
-项目采用 [MIT 许可证](LICENSE)；SQLite 为公有领域，cJSON 为 [MIT](third_party/cjson/LICENSE)，libcurl 使用 curl license。第三方源码的校验值见 [third_party/SHA256SUMS](third_party/SHA256SUMS)。
+功能分别放在 `src/` 的多个 CPP 中，由 `main.cpp` 按顺序包含，CMake 只编译入口。代码使用普通函数、结构体、字符串、数组、循环和简单指针；资源释放与阅读顺序见[技术文档](docs/design-and-implementation.md#3-代码模块与基础-c-写法)。
+
+复制程序时同时复制旁边的 `data/`；安装时程序和数据会一并安装。构建文件、本地数据库和评测结果由 `.gitignore` 排除。
+
+项目采用 [MIT 许可证](LICENSE)。SQLite 为公有领域，cJSON 使用 [MIT](third_party/cjson/LICENSE)，libcurl 使用 [curl license](https://curl.se/docs/copyright.html)。固定依赖来源及校验说明见[技术文档](docs/design-and-implementation.md#9-依赖跨平台与构建)。上游数据说明保留在 Spider 压缩包内。
