@@ -1,199 +1,400 @@
-#include "database.h"
-#include <algorithm>
-#include <cctype>
-#include <set>
-#include <stdexcept>
-
-namespace t2s {
-namespace {
-struct Statement {
-    sqlite3_stmt* ptr = nullptr;
-    ~Statement() { sqlite3_finalize(ptr); }
-};
-std::string quote(const std::string& name) {
-    std::string out = "\"";
-    for (char c : name) { out += c; if (c == '"') out += c; }
-    return out + '"';
+// SQLite 的调用集中在这个文件。结果用 QueryResult 和动态数组保存。
+void free_query(QueryResult *result) {
+    for (int i = 0; i < result->row_count; i++)
+        delete[] result->rows[i].cells;
+    delete[] result->rows;
+    result->rows = nullptr;
+    result->row_count = 0;
+    result->capacity = 0;
 }
-Json cell(sqlite3_stmt* stmt, int c) {
-    switch (sqlite3_column_type(stmt, c)) {
-    case SQLITE_NULL: return nullptr;
-    case SQLITE_INTEGER: return sqlite3_column_int64(stmt, c);
-    case SQLITE_FLOAT: return sqlite3_column_double(stmt, c);
-    case SQLITE_BLOB: {
-        static const char* digits = "0123456789abcdef";
-        auto* bytes = static_cast<const unsigned char*>(sqlite3_column_blob(stmt,c));
-        std::string hex;
-        for (int i = 0; i < sqlite3_column_bytes(stmt,c); ++i) {
-            hex += digits[bytes[i] >> 4]; hex += digits[bytes[i] & 15];
-        }
-        return Json{{"blob_hex",hex}};
-    }
-    default:
-        return std::string(reinterpret_cast<const char*>(sqlite3_column_text(stmt,c)), sqlite3_column_bytes(stmt,c));
-    }
-}
-}
-Database::Database(DatabaseOptions options): options_(options) {
-    if (sqlite3_open_v2(":memory:", &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) {
-        std::string error = db_ ? sqlite3_errmsg(db_) : "allocation failed";
-        sqlite3_close(db_); db_ = nullptr;
-        throw std::runtime_error("Cannot open demo database: " + error);
-    }
-}
-Database::Database(const std::string& path, DatabaseOptions options): options_(options) {
-    if (path.empty() || path == ":memory:" || path.find('\0') != std::string::npos)
-        throw std::runtime_error("Expected an existing SQLite file path");
-    if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) {
-        std::string error = db_ ? sqlite3_errmsg(db_) : "allocation failed";
-        sqlite3_close(db_); db_ = nullptr;
-        throw std::runtime_error("Cannot open database: " + error);
-    }
-    try { harden(); list_tables(); }
-    catch (...) { sqlite3_close(db_); db_ = nullptr; throw; }
-}
-Database::~Database() { sqlite3_close(db_); }
-std::unique_ptr<Database> Database::from_sql(const std::string& sql, DatabaseOptions options) {
-    auto db = std::unique_ptr<Database>(new Database(options));
-    char* error = nullptr;
-    if (sqlite3_exec(db->db_, sql.c_str(), nullptr, nullptr, &error) != SQLITE_OK) {
-        std::string message = error ? error : "Demo initialization failed";
-        sqlite3_free(error); throw std::runtime_error(message);
-    }
-    db->harden(); return db;
-}
-void Database::harden() {
-    if (options_.timeout_ms < 1 || options_.max_display_rows < 1 || options_.max_preview_rows < 1 ||
-        options_.max_sql_bytes < 1 || options_.max_result_bytes < 1)
-        throw std::runtime_error("Invalid database limits");
-    sqlite3_db_config(db_, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
-    sqlite3_db_config(db_, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr);
-    sqlite3_db_config(db_, SQLITE_DBCONFIG_DQS_DML, options_.reference_double_quoted_strings ? 1 : 0, nullptr);
-    sqlite3_exec(db_, "PRAGMA query_only=ON", nullptr, nullptr, nullptr);
-    sqlite3_busy_timeout(db_, options_.timeout_ms);
-    sqlite3_limit(db_, SQLITE_LIMIT_LENGTH, 1048576);
-    sqlite3_limit(db_, SQLITE_LIMIT_SQL_LENGTH, options_.max_sql_bytes);
-    sqlite3_limit(db_, SQLITE_LIMIT_COLUMN, 128);
-    sqlite3_limit(db_, SQLITE_LIMIT_EXPR_DEPTH, 100);
-    sqlite3_limit(db_, SQLITE_LIMIT_COMPOUND_SELECT, 20);
-    sqlite3_limit(db_, SQLITE_LIMIT_VDBE_OP, 250000);
-    sqlite3_limit(db_, SQLITE_LIMIT_ATTACHED, 0);
-    sqlite3_set_authorizer(db_, authorize, this);
-}
-int Database::authorize(void* context, int action, const char*, const char* arg2, const char*, const char*) {
-    auto& db = *static_cast<Database*>(context);
-    if (db.internal_) return SQLITE_OK;
-    if (action == SQLITE_SELECT || action == SQLITE_READ || action == SQLITE_RECURSIVE) return SQLITE_OK;
-    if (action == SQLITE_FUNCTION && arg2) {
-        static const std::set<std::string> allowed = {
-            "abs","avg","count","sum","total","min","max","round","coalesce","ifnull","nullif",
-            "lower","upper","length","octet_length","substr","substring","trim","ltrim","rtrim","replace",
-            "instr","like","glob","concat","concat_ws","format","printf","unicode","char","hex","unhex",
-            "typeof","quote","group_concat","string_agg","date","time","datetime","julianday","unixepoch",
-            "strftime","timediff","row_number","rank","dense_rank","percent_rank","cume_dist","ntile",
-            "lag","lead","first_value","last_value","nth_value","json","json_valid","json_extract",
-            "json_array_length","json_type","json_quote","json_array","json_object","json_group_array","json_group_object"
-        };
-        std::string name = arg2;
-        std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c){return std::tolower(c);});
-        if (allowed.contains(name)) return SQLITE_OK;
+int database_authorize(void *context, int action, const char *, const char *arg2, const char *,
+                       const char *) {
+    Database *db = (Database *)context;
+    if (db->internal) return SQLITE_OK;
+    if (action == SQLITE_SELECT || action == SQLITE_READ || action == SQLITE_RECURSIVE)
+        return SQLITE_OK;
+    if (action == SQLITE_FUNCTION && arg2 != nullptr) {
+        const char *allowed[] = {"abs",
+                                 "avg",
+                                 "count",
+                                 "sum",
+                                 "total",
+                                 "min",
+                                 "max",
+                                 "round",
+                                 "coalesce",
+                                 "ifnull",
+                                 "nullif",
+                                 "lower",
+                                 "upper",
+                                 "length",
+                                 "octet_length",
+                                 "substr",
+                                 "substring",
+                                 "trim",
+                                 "ltrim",
+                                 "rtrim",
+                                 "replace",
+                                 "instr",
+                                 "like",
+                                 "glob",
+                                 "concat",
+                                 "concat_ws",
+                                 "format",
+                                 "printf",
+                                 "unicode",
+                                 "char",
+                                 "hex",
+                                 "unhex",
+                                 "typeof",
+                                 "quote",
+                                 "group_concat",
+                                 "string_agg",
+                                 "date",
+                                 "time",
+                                 "datetime",
+                                 "julianday",
+                                 "unixepoch",
+                                 "strftime",
+                                 "timediff",
+                                 "row_number",
+                                 "rank",
+                                 "dense_rank",
+                                 "percent_rank",
+                                 "cume_dist",
+                                 "ntile",
+                                 "lag",
+                                 "lead",
+                                 "first_value",
+                                 "last_value",
+                                 "nth_value",
+                                 "json",
+                                 "json_valid",
+                                 "json_extract",
+                                 "json_array_length",
+                                 "json_type",
+                                 "json_quote",
+                                 "json_array",
+                                 "json_object",
+                                 "json_group_array",
+                                 "json_group_object"};
+        string name = arg2;
+        for (int i = 0; i < (int)name.length(); i++)
+            name[i] = (char)tolower((unsigned char)name[i]);
+        int count = sizeof(allowed) / sizeof(allowed[0]);
+        for (int i = 0; i < count; i++)
+            if (name == allowed[i]) return SQLITE_OK;
     }
     return SQLITE_DENY;
 }
-int Database::progress(void* context) {
-    auto& db = *static_cast<Database*>(context);
+int database_progress(void *context) {
+    Database *db = (Database *)context;
     if (cancelled) return 1;
-    if (Clock::now() >= db.deadline_) { db.timed_out_ = true; return 1; }
+    if (now_ms() >= db->deadline) {
+        db->timed_out = true;
+        return 1;
+    }
     return 0;
 }
-Json Database::internal_query(const std::string& sql) {
-    struct Guard { bool& flag; Guard(bool& f):flag(f){flag=true;} ~Guard(){flag=false;} } guard(internal_);
-    timed_out_=false;deadline_=Clock::now()+std::chrono::milliseconds(options_.timeout_ms);
-    sqlite3_progress_handler(db_,1000,progress,this);
-    struct ProgressGuard {sqlite3* db;~ProgressGuard(){sqlite3_progress_handler(db,0,nullptr,nullptr);}} progress_guard{db_};
-    Statement stmt;
-    if (sqlite3_prepare_v3(db_, sql.c_str(), -1, 0, &stmt.ptr, nullptr) != SQLITE_OK)
-        throw std::runtime_error(sqlite3_errmsg(db_));
-    Json out = Json::array(); int status;size_t bytes=0;
-    while ((status = sqlite3_step(stmt.ptr)) == SQLITE_ROW) {
-        if(cancelled)throw std::runtime_error("Schema read cancelled");
-        if(Clock::now()>=deadline_)throw std::runtime_error("Schema read timed out");
-        Json row = Json::object();
-        for (int c=0;c<sqlite3_column_count(stmt.ptr);++c) row[sqlite3_column_name(stmt.ptr,c)] = cell(stmt.ptr,c);
-        bytes+=row.dump(-1,' ',false,Json::error_handler_t::replace).size();
-        if(bytes>1048576)throw std::runtime_error("Schema exceeds 1 MB");
-        out.push_back(std::move(row));
-        if (out.size() > 10000) throw std::runtime_error("Schema exceeds 10000 entries");
+void close_database(Database *db) {
+    if (db->connection != nullptr) {
+        sqlite3_progress_handler(db->connection, 0, nullptr, nullptr);
+        sqlite3_set_authorizer(db->connection, nullptr, nullptr);
+        sqlite3_close(db->connection);
+        db->connection = nullptr;
     }
-    if (status != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db_));
-    return out;
 }
-Json Database::list_tables() {
-    return internal_query("SELECT name, type FROM sqlite_schema WHERE type IN ('table','view') AND name NOT GLOB 'sqlite_*' ORDER BY name");
-}
-Json Database::describe_tables(const std::vector<std::string>& names) {
-    auto tables = list_tables(); Json result = Json::array();size_t bytes=0;
-    for (const auto& name : names) {
-        auto found = std::find_if(tables.begin(), tables.end(), [&](const Json& t){return t["name"]==name;});
-        if (found == tables.end()) throw std::runtime_error("Unknown table: " + name);
-        result.push_back(Json{{"name",name},{"type",(*found)["type"]},
-            {"columns",internal_query("PRAGMA table_xinfo(" + quote(name) + ")")},
-            {"foreign_keys",internal_query("PRAGMA foreign_key_list(" + quote(name) + ")")}});
-        bytes+=result.back().dump(-1,' ',false,Json::error_handler_t::replace).size();
-        if(bytes>1048576)throw std::runtime_error("Schema exceeds 1 MB; select fewer tables");
+Status configure_database(Database *db) {
+    DatabaseOptions *options = &db->options;
+    if (options->timeout_ms < 1 || options->max_display_rows < 1 || options->max_preview_rows < 1 ||
+        options->max_sql_bytes < 1 || options->max_result_bytes < 1) {
+        return failed_status("Invalid database limits");
     }
-    return result;
+    int dqs = 0;
+    if (options->reference_double_quoted_strings) dqs = 1;
+    sqlite3_db_config(db->connection, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
+    sqlite3_db_config(db->connection, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr);
+    sqlite3_db_config(db->connection, SQLITE_DBCONFIG_DQS_DML, dqs, nullptr);
+    if (sqlite3_exec(db->connection, "PRAGMA query_only=ON", nullptr, nullptr, nullptr) !=
+        SQLITE_OK) {
+        return failed_status("Cannot configure read-only database");
+    }
+    sqlite3_busy_timeout(db->connection, options->timeout_ms);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_LENGTH, 1048576);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_SQL_LENGTH, options->max_sql_bytes);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_COLUMN, 128);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_EXPR_DEPTH, 100);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_COMPOUND_SELECT, 20);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_VDBE_OP, 250000);
+    sqlite3_limit(db->connection, SQLITE_LIMIT_ATTACHED, 0);
+    sqlite3_set_authorizer(db->connection, database_authorize, db);
+    return ok_status();
 }
-Json Database::schema() {
-    std::vector<std::string> names;
-    for (const auto& t : list_tables()) names.push_back(t.at("name").get<std::string>());
-    return describe_tables(names);
+void install_database(Database *db, Database *opened) {
+    close_database(db);
+    db->connection = opened->connection;
+    opened->connection = nullptr;
+    db->options = opened->options;
+    db->internal = false;
+    sqlite3_set_authorizer(db->connection, database_authorize, db);
 }
-Json Database::execute(const std::string& sql, int row_limit) {
-    auto start = Clock::now(); timed_out_ = false;
-    deadline_ = start + std::chrono::milliseconds(options_.timeout_ms);
-    Json result{{"success",false},{"sql",sql},{"columns",Json::array()},{"rows",Json::array()},
-        {"error",nullptr},{"execution_ms",0.0},{"truncated",false},{"query_id",++query_id_},
-        {"timed_out",false},{"cancelled",false}};
-    sqlite3_progress_handler(db_, 1000, progress, this);
-    try {
-        if (cancelled) throw std::runtime_error("Query cancelled");
-        if (sql.size() > static_cast<size_t>(options_.max_sql_bytes)) throw std::runtime_error("SQL exceeds length limit");
-        if (sql.find('\0') != std::string::npos) throw std::runtime_error("SQL contains NUL");
-        Statement stmt; const char* tail=nullptr;
-        if (sqlite3_prepare_v3(db_, sql.c_str(), static_cast<int>(sql.size()+1), 0, &stmt.ptr, &tail) != SQLITE_OK)
-            throw std::runtime_error(sqlite3_errmsg(db_));
-        if (!stmt.ptr) throw std::runtime_error("Empty SQL");
-        Statement extra;
-        if (tail && (sqlite3_prepare_v3(db_, tail, -1, 0, &extra.ptr, nullptr) != SQLITE_OK || extra.ptr))
-            throw std::runtime_error("Multiple SQL statements are forbidden");
-        if (!sqlite3_stmt_readonly(stmt.ptr)) throw std::runtime_error("Only read-only SQL is allowed");
-        if (Clock::now() >= deadline_) { timed_out_=true; throw std::runtime_error("Query timed out"); }
-        int count = sqlite3_column_count(stmt.ptr);
-        if (!count) throw std::runtime_error("Expected a result-producing query");
-        for (int c=0;c<count;++c) result["columns"].push_back(sqlite3_column_name(stmt.ptr,c));
-        int limit = row_limit < 0 ? options_.max_display_rows : row_limit;
-        if (limit < 1) throw std::runtime_error("Invalid row limit");
-        size_t bytes = 0; int status;
-        while ((status=sqlite3_step(stmt.ptr)) == SQLITE_ROW) {
-            if (elapsed_ms(start) >= options_.timeout_ms) { timed_out_=true; throw std::runtime_error("Query timed out"); }
-            if (cancelled) throw std::runtime_error("Query cancelled");
-            if (result["rows"].size() >= static_cast<size_t>(limit)) { result["truncated"]=true; break; }
-            Json row = Json::array();
-            for (int c=0;c<count;++c) row.push_back(cell(stmt.ptr,c));
-            bytes += row.dump(-1,' ',false,Json::error_handler_t::replace).size();
-            if (bytes > static_cast<size_t>(options_.max_result_bytes)) {result["truncated"]=true; break;}
-            result["rows"].push_back(std::move(row));
+Status open_database(Database *db, string path, DatabaseOptions options) {
+    if (path.empty() || path == ":memory:" || path.find('\0') != string::npos)
+        return failed_status("Expected an existing SQLite file path");
+    Database opened;
+    opened.options = options;
+    int code = sqlite3_open_v2(path.c_str(), &opened.connection,
+                               SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
+    if (code != SQLITE_OK) {
+        string error = "Cannot allocate database";
+        if (opened.connection != nullptr) error = sqlite3_errmsg(opened.connection);
+        close_database(&opened);
+        return failed_status("Cannot open database: " + error);
+    }
+    Status result = configure_database(&opened);
+    if (result.success) {
+        QueryResult tables = list_tables(&opened);
+        if (!tables.success) result = failed_status(tables.error);
+        free_query(&tables);
+    }
+    if (!result.success) {
+        close_database(&opened);
+        return result;
+    }
+    install_database(db, &opened);
+    return ok_status();
+}
+Status create_demo_database(Database *db, string sql, DatabaseOptions options) {
+    Database opened;
+    opened.options = options;
+    int code =
+        sqlite3_open_v2(":memory:", &opened.connection,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nullptr);
+    if (code != SQLITE_OK) {
+        close_database(&opened);
+        return failed_status("Cannot open demo database");
+    }
+    char *error = nullptr;
+    code = sqlite3_exec(opened.connection, sql.c_str(), nullptr, nullptr, &error);
+    if (code != SQLITE_OK) {
+        string message = "Demo initialization failed";
+        if (error != nullptr) message = error;
+        sqlite3_free(error);
+        close_database(&opened);
+        return failed_status(message);
+    }
+    Status result = configure_database(&opened);
+    if (!result.success) {
+        close_database(&opened);
+        return result;
+    }
+    install_database(db, &opened);
+    return ok_status();
+}
+Cell read_cell(sqlite3_stmt *statement, int column) {
+    Cell result;
+    result.type = sqlite3_column_type(statement, column);
+    if (result.type == SQLITE_INTEGER) result.integer = sqlite3_column_int64(statement, column);
+    if (result.type == SQLITE_FLOAT) result.real = sqlite3_column_double(statement, column);
+    if (result.type == SQLITE_TEXT) {
+        const char *text = (const char *)sqlite3_column_text(statement, column);
+        int bytes = sqlite3_column_bytes(statement, column);
+        if (text != nullptr) result.text.assign(text, bytes);
+    }
+    if (result.type == SQLITE_BLOB) {
+        const unsigned char *bytes = (const unsigned char *)sqlite3_column_blob(statement, column);
+        const char *digits = "0123456789abcdef";
+        for (int i = 0; i < sqlite3_column_bytes(statement, column); i++) {
+            result.text += digits[bytes[i] / 16];
+            result.text += digits[bytes[i] % 16];
         }
-        if (status != SQLITE_DONE && status != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(db_));
-        if (Clock::now() >= deadline_) { timed_out_=true; throw std::runtime_error("Query timed out"); }
-        result["success"] = true;
-    } catch (const std::exception& e) {
-        result["error"] = timed_out_ ? "Query timed out" : (cancelled ? "Query cancelled" : e.what());
-        result["rows"] = Json::array();
     }
-    sqlite3_progress_handler(db_,0,nullptr,nullptr);
-    result["execution_ms"]=elapsed_ms(start); result["timed_out"]=timed_out_; result["cancelled"]=cancelled!=0;
     return result;
 }
+bool grow_query(QueryResult *result) {
+    if (result->row_count < result->capacity) return true;
+    int capacity = 32;
+    if (result->capacity > 0) capacity = result->capacity * 2;
+    QueryRow *rows = new (nothrow) QueryRow[capacity];
+    if (rows == nullptr) return false;
+    for (int i = 0; i < result->row_count; i++)
+        rows[i] = result->rows[i];
+    delete[] result->rows;
+    result->rows = rows;
+    result->capacity = capacity;
+    return true;
+}
+QueryResult execute_sql(Database *db, string sql, int row_limit) {
+    QueryResult result;
+    result.sql = sql;
+    double start = now_ms();
+    db->deadline = start + db->options.timeout_ms;
+    db->timed_out = false;
+    sqlite3_stmt *statement = nullptr;
+    sqlite3_stmt *extra = nullptr;
+    if (db->connection == nullptr)
+        result.error = "Database is not open";
+    else if (cancelled)
+        result.error = "Query cancelled";
+    else if ((int)sql.length() > db->options.max_sql_bytes)
+        result.error = "SQL exceeds length limit";
+    else if (sql.find('\0') != string::npos)
+        result.error = "SQL contains NUL";
+    if (result.error.empty()) {
+        sqlite3_progress_handler(db->connection, 1000, database_progress, db);
+        const char *tail = nullptr;
+        int code = sqlite3_prepare_v3(db->connection, sql.c_str(), (int)sql.length() + 1, 0,
+                                      &statement, &tail);
+        if (code != SQLITE_OK) {
+            result.error = sqlite3_errmsg(db->connection);
+        } else if (statement == nullptr) {
+            result.error = "Empty SQL";
+        } else if (tail != nullptr) {
+            code = sqlite3_prepare_v3(db->connection, tail, -1, 0, &extra, nullptr);
+            if (code != SQLITE_OK || extra != nullptr)
+                result.error = "Multiple SQL statements are forbidden";
+        }
+    }
+    if (result.error.empty() && !sqlite3_stmt_readonly(statement))
+        result.error = "Only read-only SQL is allowed";
+    if (result.error.empty()) {
+        result.column_count = sqlite3_column_count(statement);
+        if (result.column_count < 1 || result.column_count > 128)
+            result.error = "Expected a result-producing query";
+        for (int c = 0; c < result.column_count; c++)
+            result.columns[c] = sqlite3_column_name(statement, c);
+    }
+    if (row_limit < 0) row_limit = db->options.max_display_rows;
+    if (row_limit < 1) result.error = "Invalid row limit";
+    int bytes = 0;
+    while (result.error.empty()) {
+        if (now_ms() >= db->deadline) {
+            db->timed_out = true;
+            result.error = "Query timed out";
+            break;
+        }
+        if (cancelled) {
+            result.error = "Query cancelled";
+            break;
+        }
+        int code = sqlite3_step(statement);
+        if (code == SQLITE_DONE) {
+            result.success = true;
+            break;
+        }
+        if (code != SQLITE_ROW) {
+            result.error = sqlite3_errmsg(db->connection);
+            break;
+        }
+        if (result.row_count == row_limit) {
+            result.truncated = true;
+            result.success = true;
+            break;
+        }
+        Cell *cells = new (nothrow) Cell[result.column_count];
+        if (cells == nullptr) {
+            result.error = "Cannot allocate query row";
+            break;
+        }
+        int row_bytes = 2;
+        for (int c = 0; c < result.column_count; c++) {
+            cells[c] = read_cell(statement, c);
+            row_bytes += cell_bytes(&cells[c]);
+            if (c > 0) row_bytes++;
+        }
+        if (!result.error.empty()) {
+            delete[] cells;
+            break;
+        }
+        if (bytes + row_bytes > db->options.max_result_bytes) {
+            delete[] cells;
+            result.truncated = true;
+            result.success = true;
+            break;
+        }
+        if (!grow_query(&result)) {
+            delete[] cells;
+            result.error = "Cannot allocate query results";
+            break;
+        }
+        result.rows[result.row_count].cells = cells;
+        result.row_count++;
+        bytes += row_bytes;
+    }
+    if (now_ms() >= db->deadline) {
+        db->timed_out = true;
+        result.error = "Query timed out";
+        result.success = false;
+    }
+    if (db->timed_out) result.error = "Query timed out";
+    if (cancelled) {
+        result.error = "Query cancelled";
+        result.success = false;
+    }
+    sqlite3_finalize(extra);
+    sqlite3_finalize(statement);
+    if (db->connection != nullptr) sqlite3_progress_handler(db->connection, 0, nullptr, nullptr);
+    result.timed_out = db->timed_out;
+    result.cancelled = cancelled != 0;
+    if (!result.success) free_query(&result);
+    return result;
+}
+string quote_name(string name) {
+    string result = "\"";
+    for (int i = 0; i < (int)name.length(); i++) {
+        result += name[i];
+        if (name[i] == '"') result += '"';
+    }
+    return result + '"';
+}
+QueryResult internal_query(Database *db, string sql) {
+    db->internal = true;
+    int original_bytes = db->options.max_result_bytes;
+    db->options.max_result_bytes = 1048576;
+    QueryResult result = execute_sql(db, sql, 10000);
+    db->options.max_result_bytes = original_bytes;
+    db->internal = false;
+    if (result.truncated) {
+        result.success = false;
+        result.error = "Schema exceeds size limit";
+        free_query(&result);
+    }
+    return result;
+}
+QueryResult list_tables(Database *db) {
+    return internal_query(db, "SELECT name, type FROM sqlite_schema WHERE type IN ('table','view') "
+                              "AND name NOT GLOB 'sqlite_*' ORDER BY name");
+}
+
+TextResult read_schema(Database *db) {
+    TextResult result;
+    QueryResult tables = list_tables(db);
+    if (!tables.success) return failed_text(tables.error);
+    for (int i = 0; i < tables.row_count; i++) {
+        string name = tables.rows[i].cells[0].text;
+        result.text += "表 " + quote_name(name) + " (" + tables.rows[i].cells[1].text + ")\n";
+        QueryResult columns = internal_query(db, "PRAGMA table_xinfo(" + quote_name(name) + ")");
+        if (!columns.success) result.error = columns.error;
+        for (int r = 0; r < columns.row_count; r++) {
+            Cell *column = columns.rows[r].cells;
+            result.text += "  " + quote_name(column[1].text) + " " + column[2].text;
+            if (column[3].integer) result.text += " NOT NULL";
+            if (column[5].integer) result.text += " PRIMARY KEY " + to_string(column[5].integer);
+            result.text += "\n";
+        }
+        free_query(&columns);
+        QueryResult keys = internal_query(db, "PRAGMA foreign_key_list(" + quote_name(name) + ")");
+        if (!keys.success) result.error = keys.error;
+        for (int r = 0; r < keys.row_count; r++) {
+            Cell *key = keys.rows[r].cells;
+            result.text += "  外键 " + quote_name(key[3].text) + " -> " + quote_name(key[2].text) +
+                           "." + quote_name(key[4].text) + "\n";
+        }
+        free_query(&keys);
+        if (result.text.length() > 500000) result.error = "数据库结构超过大小上限";
+        if (!result.error.empty()) break;
+    }
+    free_query(&tables);
+    result.success = result.error.empty();
+    return result;
 }

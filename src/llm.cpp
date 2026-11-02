@@ -1,172 +1,229 @@
-#include "llm.h"
-#include <algorithm>
-#include <cstring>
-#include <curl/curl.h>
-#include <set>
-#include <stdexcept>
-
-namespace t2s {
-namespace {
-constexpr size_t response_limit=2*1024*1024;
-struct CurlGlobal {
-    CurlGlobal() {
-        if(curl_global_init(CURL_GLOBAL_DEFAULT)!=CURLE_OK)
-            throw std::runtime_error("Cannot initialize libcurl");
-    }
-    ~CurlGlobal(){curl_global_cleanup();}
-};
-struct CurlHandle {
-    CURL* value=curl_easy_init();
-    CurlHandle(){if(!value)throw std::runtime_error("Cannot create libcurl handle");}
-    ~CurlHandle(){curl_easy_cleanup(value);}
-};
-struct CurlHeaders {
-    curl_slist* value=nullptr;
-    ~CurlHeaders(){curl_slist_free_all(value);}
-    void append(const std::string& header) {
-        auto* next=curl_slist_append(value,header.c_str());
-        if(!next)throw std::runtime_error("Cannot allocate HTTP headers");
-        value=next;
-    }
-};
+// HTTPS 请求和 SQL 回复。没有工具调用协议或 token 统计。
+const int response_limit = 2 * 1024 * 1024;
 struct ResponseBuffer {
-    std::string data;
-    bool too_large=false;
+    char *data = nullptr;
+    size_t used = 0;
+    bool too_large = false;
 };
-size_t receive(char* data,size_t size,size_t count,void* context) noexcept {
-    auto& response=*static_cast<ResponseBuffer*>(context);
-    if(size!=0&&count>static_cast<size_t>(-1)/size){response.too_large=true;return 0;}
-    size_t bytes=size*count;
-    if(bytes>response_limit-response.data.size()){response.too_large=true;return 0;}
-    try{response.data.append(data,bytes);}catch(...){return 0;}
+size_t receive_response(char *data, size_t size, size_t count, void *context) {
+    ResponseBuffer *response = (ResponseBuffer *)context;
+    if (size != 0 && count > (size_t)-1 / size) {
+        response->too_large = true;
+        return 0;
+    }
+    size_t bytes = size * count;
+    if (bytes > response_limit - response->used) {
+        response->too_large = true;
+        return 0;
+    }
+    memcpy(response->data + response->used, data, bytes);
+    response->used += bytes;
+    response->data[response->used] = '\0';
     return bytes;
 }
-int progress(void*,curl_off_t,curl_off_t,curl_off_t,curl_off_t) noexcept {
-    return cancelled?1:0;
+int http_progress(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    if (cancelled) return 1;
+    return 0;
 }
-template<typename T>
-void option(CURL* handle,CURLoption key,T value) {
-    if(curl_easy_setopt(handle,key,value)!=CURLE_OK)
-        throw std::runtime_error("Cannot configure libcurl request");
-};
-void validate(const ApiOptions& api) {
-    // HTTPS only; redirects and curl configuration discovery are disabled.
-    if(!api.base_url.starts_with("https://") || api.base_url.size()>2048 ||
-       api.base_url.find_first_of("\r\n\t \"\\?#")!=std::string::npos || api.base_url.find('\0')!=std::string::npos)
-        throw std::runtime_error("API base_url must be a plain HTTPS URL");
-    auto host=api.base_url.substr(8,api.base_url.find('/',8)-8);
-    if(host.empty()||host.find('@')!=std::string::npos)throw std::runtime_error("Invalid API host");
-    if(api.api_key.empty())throw std::runtime_error("Missing API key: set DEEPSEEK_API_KEY or config.json");
-    if(api.api_key.size()>4096 || std::any_of(api.api_key.begin(),api.api_key.end(),[](unsigned char c){return c<33||c==127;}))
-        throw std::runtime_error("Invalid API key format");
-    if(api.timeout_seconds<1||api.timeout_seconds>600)throw std::runtime_error("Invalid API timeout");
+Status validate_api(ApiOptions *api) {
+    if (api->base_url.compare(0, 8, "https://") != 0 || api->base_url.length() > 2048 ||
+        api->base_url.find_first_of("\r\n\t \"\\?#") != string::npos ||
+        api->base_url.find('\0') != string::npos) {
+        return failed_status("API base_url must be a plain HTTPS URL");
+    }
+    string host = api->base_url.substr(8, api->base_url.find('/', 8) - 8);
+    if (host.empty() || host.find('@') != string::npos) return failed_status("Invalid API host");
+    if (api->api_key.empty())
+        return failed_status("Missing API key: set DEEPSEEK_API_KEY or config.json");
+    if (api->api_key.length() > 4096) return failed_status("Invalid API key format");
+    for (int i = 0; i < (int)api->api_key.length(); i++) {
+        unsigned char c = api->api_key[i];
+        if (c < 33 || c == 127) return failed_status("Invalid API key format");
+    }
+    if (api->timeout_seconds < 1 || api->timeout_seconds > 600)
+        return failed_status("Invalid API timeout");
+    return ok_status();
 }
-}
-Json request_body(const ApiOptions& api,const Json& messages,const Json& tools) {
-    Json body{{"model",api.model},{"messages",messages},{"stream",false},{"thinking",{{"type","disabled"}}},{"max_tokens",api.max_tokens}};
-    if(!tools.empty()){body["tools"]=tools;body["tool_choice"]="auto";}
-    return body;
-}
-Json parse_completion(const Json& r) {
-    try {
-        if(r.contains("error"))throw std::runtime_error("API returned an error");
-        if(!r.at("choices").is_array()||r.at("choices").empty())throw std::runtime_error("Missing API choices");
-        const auto& choice=r.at("choices")[0];
-        auto finish=choice.value("finish_reason",std::string("stop"));
-        if(finish!="stop"&&finish!="tool_calls")throw std::runtime_error("Incomplete API response (token limit or filtering)");
-        const auto& m=choice.at("message");
-        if(m.at("role")!="assistant")throw std::runtime_error("Expected assistant response");
-        Json out{{"role","assistant"},{"content",nullptr}};
-        if(m.contains("content")&&!m["content"].is_null()) {
-            if(!m["content"].is_string())throw std::runtime_error("Invalid assistant content");
-            out["content"]=m["content"];
+TextResult curl_post(ApiOptions *api, string request) {
+    TextResult result;
+    Status valid = validate_api(api);
+    if (!valid.success) return failed_text(valid.error);
+    if (cancelled) return failed_text("API request cancelled");
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
+        return failed_text("Cannot initialize libcurl");
+    CURL *handle = curl_easy_init();
+    curl_slist *headers = nullptr;
+    ResponseBuffer response;
+    response.data = new (nothrow) char[response_limit + 1];
+    if (handle == nullptr || response.data == nullptr)
+        result.error = "Cannot allocate HTTP request";
+    if (result.error.empty()) {
+        response.data[0] = '\0';
+        string authorization = "Authorization: Bearer " + api->api_key;
+        headers = curl_slist_append(nullptr, authorization.c_str());
+        for (int i = 0; i < (int)authorization.length(); i++)
+            authorization[i] = '\0';
+        if (headers == nullptr) result.error = "Cannot allocate HTTP headers";
+        const char *extra[] = {"Content-Type: application/json", "Accept: application/json"};
+        for (int i = 0; i < 2 && result.error.empty(); i++) {
+            curl_slist *added = curl_slist_append(headers, extra[i]);
+            if (added == nullptr)
+                result.error = "Cannot allocate HTTP headers";
+            else
+                headers = added;
         }
-        if(m.contains("tool_calls")&&!m["tool_calls"].is_null()) {
-            const auto& calls=m["tool_calls"];
-            if(!calls.is_array()||calls.size()>16)throw std::runtime_error("Invalid tool_calls");
-            std::set<std::string> ids;
-            for(const auto& t:calls) {
-                auto id=t.at("id").get<std::string>();
-                if(id.empty()||!ids.insert(id).second||t.at("type")!="function"||
-                   !t.at("function").at("name").is_string()||!t.at("function").at("arguments").is_string())
-                    throw std::runtime_error("Invalid tool call envelope");
-            }
-            if(!calls.empty())out["tool_calls"]=calls;
-        }
-        if(!out.contains("tool_calls")&&(out["content"].is_null()||out["content"].get<std::string>().empty()))
-            throw std::runtime_error("Empty assistant response");
-        return Json{{"message",out},{"usage",r.value("usage",Json::object())}};
-    }catch(const nlohmann::json::exception&){throw std::runtime_error("Malformed API response structure");}
-}
-Json parse_completion_text(const std::string& text) {
-    Json r;try{r=Json::parse(text);}catch(...){throw std::runtime_error("Invalid API JSON response");}
-    return parse_completion(r);
-}
-Json curl_post(const ApiOptions& api,const Json& body) {
-    validate(api);if(cancelled)throw std::runtime_error("API request cancelled");
-    static CurlGlobal global;
-    CurlHandle handle;CurlHeaders headers;ResponseBuffer response;
-    auto request=body.dump(-1,' ',false,Json::error_handler_t::replace);
-    std::string authorization="Authorization: Bearer "+api.api_key;
-    headers.append(authorization);headers.append("Content-Type: application/json");headers.append("Accept: application/json");
-    // Best-effort overwrite of the caller-owned header copy. libcurl keeps its own
-    // curl_slist copy only for the lifetime of this request.
-    std::fill(authorization.begin(),authorization.end(),'\0');
-    std::string url=api.base_url;while(url.back()=='/')url.pop_back();url+="/chat/completions";
-    char error[CURL_ERROR_SIZE]={};
-    option(handle.value,CURLOPT_URL,url.c_str());
+    }
+    if (result.error.empty()) {
+        string url = api->base_url;
+        while (!url.empty() && url.back() == '/')
+            url.pop_back();
+        url += "/chat/completions";
+        CURLcode options[32];
+        int count = 0;
+        options[count++] = curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
 #if LIBCURL_VERSION_NUM >= 0x075500
-    option(handle.value,CURLOPT_PROTOCOLS_STR,"https");
+        options[count++] = curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https");
 #else
-    option(handle.value,CURLOPT_PROTOCOLS,static_cast<long>(CURLPROTO_HTTPS));
+        options[count++] = curl_easy_setopt(handle, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
 #endif
-    option(handle.value,CURLOPT_FOLLOWLOCATION,0L);
-    option(handle.value,CURLOPT_POST,1L);
-    option(handle.value,CURLOPT_POSTFIELDS,request.data());
-    option(handle.value,CURLOPT_POSTFIELDSIZE_LARGE,static_cast<curl_off_t>(request.size()));
-    option(handle.value,CURLOPT_HTTPHEADER,headers.value);
-    option(handle.value,CURLOPT_WRITEFUNCTION,receive);
-    option(handle.value,CURLOPT_WRITEDATA,&response);
-    option(handle.value,CURLOPT_XFERINFOFUNCTION,progress);
-    option(handle.value,CURLOPT_XFERINFODATA,static_cast<void*>(nullptr));
-    option(handle.value,CURLOPT_NOPROGRESS,0L);
-    option(handle.value,CURLOPT_NOSIGNAL,1L);
-    option(handle.value,CURLOPT_CONNECTTIMEOUT_MS,static_cast<long>(std::min(10,api.timeout_seconds)*1000));
-    option(handle.value,CURLOPT_TIMEOUT_MS,static_cast<long>(api.timeout_seconds*1000));
-    option(handle.value,CURLOPT_MAXFILESIZE_LARGE,static_cast<curl_off_t>(response_limit));
-    option(handle.value,CURLOPT_SSL_VERIFYPEER,1L);
-    option(handle.value,CURLOPT_SSL_VERIFYHOST,2L);
-    option(handle.value,CURLOPT_NETRC,static_cast<long>(CURL_NETRC_IGNORED));
-    option(handle.value,CURLOPT_USERAGENT,"agentic-text2sql-cpp/1.0");
-    option(handle.value,CURLOPT_ACCEPT_ENCODING,"");
-    option(handle.value,CURLOPT_ERRORBUFFER,error);
-    auto status=curl_easy_perform(handle.value);
-    if(response.too_large)throw std::runtime_error("API response exceeds 2 MB limit");
-    if(status==CURLE_ABORTED_BY_CALLBACK&&cancelled)throw std::runtime_error("API request cancelled");
-    if(status==CURLE_OPERATION_TIMEDOUT)throw std::runtime_error("API request timed out");
-    if(status!=CURLE_OK)throw std::runtime_error(std::string("libcurl transport failed: ")+curl_easy_strerror(status));
-    long http_status=0;
-    if(curl_easy_getinfo(handle.value,CURLINFO_RESPONSE_CODE,&http_status)!=CURLE_OK)
-        throw std::runtime_error("Cannot read API HTTP status");
-    if(http_status<200||http_status>=300)throw std::runtime_error("API HTTP error: "+std::to_string(http_status));
-    Json parsed;try{parsed=Json::parse(response.data);}catch(...){throw std::runtime_error("Invalid API JSON response");}
-    return parsed;
+        options[count++] = curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_POST, 1L);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.data());
+        options[count++] =
+            curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)request.length());
+        options[count++] = curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, receive_response);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_WRITEDATA, &response);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, http_progress);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+        int connect_seconds = api->timeout_seconds;
+        if (connect_seconds > 10) connect_seconds = 10;
+        options[count++] =
+            curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, (long)connect_seconds * 1000);
+        options[count++] =
+            curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, (long)api->timeout_seconds * 1000);
+        options[count++] =
+            curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)response_limit);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_NETRC, (long)CURL_NETRC_IGNORED);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_USERAGENT, "agentic-text2sql-cpp/1.0");
+        options[count++] = curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
+        for (int i = 0; i < count; i++)
+            if (options[i] != CURLE_OK) result.error = "Cannot configure libcurl request";
+        if (result.error.empty()) {
+            CURLcode code = curl_easy_perform(handle);
+            if (response.too_large)
+                result.error = "API response exceeds 2 MB limit";
+            else if (code == CURLE_ABORTED_BY_CALLBACK && cancelled)
+                result.error = "API request cancelled";
+            else if (code == CURLE_OPERATION_TIMEDOUT)
+                result.error = "API request timed out";
+            else if (code != CURLE_OK)
+                result.error = string("libcurl transport failed: ") + curl_easy_strerror(code);
+            if (result.error.empty()) {
+                long status = 0;
+                if (curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status) != CURLE_OK) {
+                    result.error = "Cannot read API HTTP status";
+                } else if (status < 200 || status >= 300) {
+                    result.error = "API HTTP error: " + to_string(status);
+                } else {
+                    result.text.assign(response.data, response.used);
+                    result.success = true;
+                }
+            }
+        }
+    }
+    delete[] response.data;
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(handle);
+    curl_global_cleanup();
+    return result;
 }
-Completion deepseek(ApiOptions api) {
-    return [api=std::move(api)](const Json& messages,const Json& tools){return parse_completion(curl_post(api,request_body(api,messages,tools)));};
+void close_completion(Completion *source) {
+    cJSON_Delete(source->messages);
+    source->messages = nullptr;
 }
-Json tool_call(const std::string& id,const std::string& name,const Json& args) {
-    return Json{{"id",id},{"type","function"},{"function",{{"name",name},{"arguments",args.dump()}}}};
+Status add_message(Completion *source, string role, string text) {
+    cJSON *message = cJSON_CreateObject();
+    bool valid = json_set(message, "role", json_string(role));
+    valid = json_set(message, "content", json_string(text)) && valid;
+    if (!valid) {
+        cJSON_Delete(message);
+        return failed_status("无法创建模型消息");
+    }
+    if (!json_add(source->messages, message)) return failed_status("无法创建模型上下文");
+    return ok_status();
 }
-Completion mock_demo(bool repair) {
-    return [repair,step=0](const Json&,const Json&)mutable {
-        Json message{{"role","assistant"},{"content",nullptr}};
-        if(step==0)message["tool_calls"]=Json::array({tool_call("tables","list_tables",Json::object())});
-        else if(step==1)message["tool_calls"]=Json::array({tool_call("schema","describe_tables",{{"tables",{"employees","departments"}}})});
-        else if(step==2&&repair)message["tool_calls"]=Json::array({tool_call("bad","execute_sql",{{"sql","SELECT department_name, AVG(salary) FROM employees GROUP BY department_name"}})});
-        else if(step==2|| (step==3&&repair))message["tool_calls"]=Json::array({tool_call("query","execute_sql",{{"sql","SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary FROM employees e JOIN departments d ON e.department_id = d.id GROUP BY d.id, d.name ORDER BY average_salary DESC LIMIT 3"}})});
-        else message["content"]="已按平均工资降序查询三个部门。结果来自真实 SQLite 执行。";
-        ++step;return Json{{"message",message},{"usage",Json::object()}};
-    };
+Status start_completion(Completion *source, string system, string input) {
+    close_completion(source);
+    source->mock_step = 0;
+    source->messages = cJSON_CreateArray();
+    Status result = add_message(source, "system", system);
+    if (result.success) result = add_message(source, "user", input);
+    if (!result.success) close_completion(source);
+    return result;
 }
+TextResult request_sql(Completion *source) {
+    if (cancelled) return failed_text("查询已取消");
+    if (source->mock) {
+        TextResult result;
+        result.success = true;
+        if (source->mock_step++ == 0)
+            result.text =
+                "SELECT department_name, AVG(salary) FROM employees GROUP BY department_name";
+        else
+            result.text = "SELECT d.name AS department, ROUND(AVG(e.salary), 2) AS average_salary "
+                          "FROM employees e JOIN departments d ON e.department_id=d.id GROUP BY "
+                          "d.id,d.name ORDER BY average_salary DESC LIMIT 3";
+        return result;
+    }
+    cJSON *body = cJSON_CreateObject();
+    bool valid = json_set(body, "model", json_string(source->api.model));
+    valid = json_set(body, "messages", cJSON_Duplicate(source->messages, true)) && valid;
+    valid = json_set(body, "stream", cJSON_CreateBool(false)) && valid;
+    valid = json_set(body, "max_tokens", cJSON_CreateNumber(source->api.max_tokens)) && valid;
+    cJSON *thinking = cJSON_CreateObject();
+    valid = json_set(thinking, "type", json_string("disabled")) && valid;
+    valid = json_set(body, "thinking", thinking) && valid;
+    if (!valid) {
+        cJSON_Delete(body);
+        return failed_text("无法创建 API 请求");
+    }
+    TextResult request = json_text(body);
+    if (!request.success) return request;
+    if (request.text.length() > 524288) return failed_text("模型上下文超过大小上限");
+    TextResult response = curl_post(&source->api, request.text);
+    if (!response.success) return response;
+    if (json_has_nul_escape(response.text)) return failed_text("模型回复包含 NUL");
+    cJSON *object =
+        cJSON_ParseWithLengthOpts(response.text.c_str(), response.text.length() + 1, nullptr, true);
+    cJSON *choices = cJSON_GetObjectItemCaseSensitive(object, "choices");
+    cJSON *choice = cJSON_GetArrayItem(choices, 0);
+    cJSON *message = cJSON_GetObjectItemCaseSensitive(choice, "message");
+    cJSON *role = cJSON_GetObjectItemCaseSensitive(message, "role");
+    cJSON *content = cJSON_GetObjectItemCaseSensitive(message, "content");
+    cJSON *finish = cJSON_GetObjectItemCaseSensitive(choice, "finish_reason");
+    TextResult result;
+    if (!cJSON_IsArray(choices) || !cJSON_IsString(role) ||
+        string(role->valuestring) != "assistant" || !cJSON_IsString(content))
+        result.error = "模型未返回 SQL";
+    else if (finish != nullptr &&
+             (!cJSON_IsString(finish) || string(finish->valuestring) != "stop"))
+        result.error = "模型回复不完整";
+    else
+        result.text = trim(content->valuestring);
+    cJSON_Delete(object);
+    if (!result.error.empty()) return result;
+    if (result.text.compare(0, 3, "```") == 0) {
+        size_t first = result.text.find('\n'), last = result.text.rfind("```");
+        if (first == string::npos || last <= first) return failed_text("SQL 代码块不完整");
+        result.text = trim(result.text.substr(first + 1, last - first - 1));
+    }
+    if (result.text.empty()) return failed_text("模型返回了空 SQL");
+    Status added = add_message(source, "assistant", result.text);
+    if (!added.success) return failed_text(added.error);
+    result.success = true;
+    return result;
 }

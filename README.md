@@ -1,196 +1,173 @@
-# Agentic Text-to-SQL
+# SQLite 自然语言查询：课程精简版
 
-用自然语言查询已有 SQLite 数据库。DeepSeek Flash 自主选择表结构探索、SQL 执行工具，根据 SQLite 错误有限修正，最终在普通终端显示 SQL 和结果。无需训练、本地模型或数据库服务器。
+使用真实 AI 把自然语言转换成只读 SQLite SQL。程序固定读取表结构、生成 SQL、执行查询；失败后把 SQL 错误交给 AI 修正，总共最多执行三次。启动后直接接收自然语言问题。支持 JSON 配置、Windows/macOS/Linux、离线纠错 Demo，以及 Baseline/纠错模式的 CSV 对照评测。
 
-支持标准输入 REPL、一次性查询、Schema 查看、verbose 和 JSON 输出；提供真正执行 SQLite 的离线 Mock Demo，以及 Spider 1.0 Baseline/Agentic 对照评价。
+代码使用普通函数、结构体、数组、判断、循环和适量简单指针。各功能保留独立 CPP，没有自写头文件或测试目录。阅读顺序与指针释放说明见 [基础代码说明](docs/basic-cpp.md)。
 
-需要用于课程展示、技术答辩或制作 PPT 时，可阅读[精简项目汇报](docs/project-report.md)，或直接下载 [PDF 打印版](docs/Agentic-Text-to-SQL-项目汇报.pdf)。
+## 构建和运行
 
-## 构建与测试
+clone 后已经包含样例数据库和完整 Spider 运行数据，编译后自动连接样例库。无需额外下载数据或使用 Git LFS。
 
-需要 C++20 编译器、CMake ≥ 3.20 和 libcurl ≥ 7.68 的开发包。支持 macOS、Linux 和原生 Windows/MSVC；真实 API 通过 libcurl，不需要系统 `curl` 命令。无需 Python、Node.js、Docker。SQLite 和 JSON 的固定版本源码已包含，CMake 不在线下载依赖。
+需要 C++17、CMake ≥ 3.20、libcurl ≥ 7.68。SQLite 3.50.4 和 cJSON 1.7.19 的固定源码随项目提供，CMake 不在线下载依赖。运行不需要 Python、Node.js 或数据库服务器。
 
 ```bash
-# macOS 的 Xcode Command Line Tools 自带 libcurl；缺少 CMake 时：brew install cmake
 cmake -S . -B build
 cmake --build build -j 4
-ctest --test-dir build --output-on-failure
-./build/text2sql --help
+./build/text2sql
 ./build/text2sql demo
-./build/text2sql demo --repair --verbose
+./build/text2sql --help
 ```
 
-Ubuntu/Debian 先安装：
+macOS 使用 Xcode Command Line Tools 自带的编译器和 libcurl，缺少 CMake 时可通过 Homebrew 安装。Ubuntu/Debian：
 
 ```bash
 sudo apt-get install cmake g++ libcurl4-openssl-dev
 ```
 
-Windows 推荐在 “Developer PowerShell for VS 2022” 中使用 vcpkg 静态库，避免运行时遗漏 DLL：
+Windows 在 VS 2022 Developer PowerShell 中使用 vcpkg：
 
 ```powershell
 $VCPKG_ROOT = "C:\src\vcpkg"
 & "$VCPKG_ROOT\vcpkg.exe" install curl:x64-windows-static
-
 cmake -S . -B build -A x64 `
   "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
 cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
-.\build\Release\text2sql.exe demo --repair --json
+.\build\Release\text2sql.exe
+.\build\Release\text2sql.exe demo
 ```
 
-Windows 入口直接读取 UTF-16 命令行并转换为 UTF-8，控制台设为 UTF-8；中文配置、数据库、数据集和结果路径会按 UTF-8 传入 SQLite 和 `std::filesystem`。
+Windows 保留原生 UTF-16 参数转 UTF-8、UTF-8 控制台、中文路径、MSVC 和静态运行库适配。
 
-`demo` 明确标记 `Demo Mode (Mock LLM)`，通过 `examples/demo.sql` 内置内存数据库。正常演示使用工具探索 Schema 后执行 JOIN 聚合；`--repair` 先执行不存在的 `department_name` 字段，收到错误后改用真实字段。预设的是模型消息，表结构、错误与结果由 SQLite 实时产生：Engineering 115000、Finance 95000、Marketing 82500。
+## JSON 配置
 
-二进制不依赖源码目录，复制到其他目录仍可运行 Demo。可选安装：`cmake --install build --prefix "$HOME/.local"`。
-
-## DeepSeek 配置
+复制示例后编辑本地配置：
 
 ```bash
 cp config.example.json config.json
-# 在当前终端安全输入密钥（不回显，也不进入命令历史）
+```
+
+`config.json` 支持 `api`、`agent`、`database` 三个部分；可以省略字段并使用默认值。
+
+```json
+{
+  "api": {
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "api_key": "",
+    "timeout_seconds": 45,
+    "max_tokens": 2048
+  },
+  "agent": { "max_sql_attempts": 3 },
+  "database": {
+    "path": "data/company.sqlite",
+    "timeout_ms": 5000,
+    "max_display_rows": 100,
+    "max_sql_bytes": 16384,
+    "max_result_bytes": 1048576
+  }
+}
+```
+
+也可从 `DEEPSEEK_API_KEY` 环境变量读取密钥。环境变量优先，空环境变量也覆盖文件值。macOS/zsh 可安全输入，不回显且不把密钥写入命令历史：
+
+```bash
 read -rs DEEPSEEK_API_KEY
 export DEEPSEEK_API_KEY
 ```
 
-也可在本地 `config.json` 填写 `api.api_key`。环境变量优先，空环境变量也会覆盖文件值。`config.json` 和 `.env` 已忽略；密钥不会写入 API 请求参数或日志。未配置密钥时仍可运行 Demo、Schema 和 REPL 本地命令。程序从当前目录读取可选 `config.json`，或使用 `--config PATH` 指定（指定文件不存在则报错）。
-
-默认官方 Base URL `https://api.deepseek.com`，请求 `/chat/completions`，模型 `deepseek-flash`（DeepSeek V4.1 Flash）。2026-10-21 核对官方 [Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion) 和 [Tool Calling](https://api-docs.deepseek.com/guides/tool_calls/)：非流式、`thinking.type=disabled`、`tool_choice=auto`。不要求输出思维链。可配置 HTTPS Base URL 和模型，不自动探测或改用其他模型。
-
-配置默认上限：8 轮模型调用、3 次 SQL 尝试、2 次错误修正，SQL 执行 5000 ms、本地显示 100 行、模型预览 10 行。可选 `database.max_sql_bytes`（默认 16384）和 `database.max_result_bytes`（默认 1048576）；配置值会验证类型和范围。
-
-## CLI 和 REPL
+默认读取当前目录的可选 `config.json`。指定配置：
 
 ```bash
-./build/text2sql
-./build/text2sql --db ./data/company.sqlite
+./build/text2sql --config "配置/我的配置.json"
 ```
 
-以 `/` 开头的输入是内部命令，其余输入是自然语言问题。每个问题启动新的 Agent 上下文。
+指定文件不存在或配置非法时会报错。配置和环境文件已被 `.gitignore` 排除；错误信息不会输出配置内容或密钥。
 
-| 命令 | 作用 |
-|---|---|
-| `/help` | 帮助 |
-| `/open <path>` | 打开已有 SQLite 文件；整段参数作为路径，可使用引号包含空格 |
-| `/tables` | 列出表和视图 |
-| `/schema` | 字段类型、主键和外键 |
-| `/model` | 模型、Base URL 和密钥是否配置 |
-| `/verbose on`、`/verbose off` | 切换工具过程输出 |
-| `/exit` | 退出 |
+`max_sql_attempts` 可降低执行次数，程序始终限制为最多三次。旧配置中的 `max_steps`、`max_repairs` 仍会保留更低的次数限制；`max_preview_rows` 兼容读取，但当前流程不上传查询行预览。Baseline 始终最多执行一次。
+
+## 直接输入自然语言
+
+启动后显示已连接数据库、示例问题和输入提示：
 
 ```text
-/open "data/我的 数据库.sqlite"
-/tables
-/schema
-/verbose on
-查询平均工资最高的三个部门
-/exit
+SQLite 自然语言查询
+已连接：company.sqlite
+直接输入问题并按回车，每次查询后可以继续提问。
+例如：查询「employees」表的记录总数。
+输入 /help 查看引导，输入 /exit 退出。
+
+你：查询平均工资最高的部门
 ```
 
-EOF 正常退出；Ctrl+C 取消当前请求/查询并退出，状态码为 130。错误路径打开失败时保留当前已连接数据库。
-
-一次性查询与结构查看：
+数据库可以在 JSON 的 `database.path` 中配置，或通过 `--db` 指定，参数优先：
 
 ```bash
-./build/text2sql query --db ./data/company.sqlite \
-  --question "Which department has the highest average salary?"
-./build/text2sql query --db ./data/company.sqlite \
-  --question "List employee names with departments" --verbose
-./build/text2sql schema --db ./data/company.sqlite
-./build/text2sql schema --db ./data/company.sqlite --json
+./build/text2sql --db "data/company.sqlite"
 ```
 
-数据库读取实际结构，支持不同 Schema；不根据 Demo 字段映射自然语言。输入是已有 SQLite 文件，程序不会创建用户数据库。
+配置中的相对数据库路径以配置文件所在目录为基准。没有提供路径时，默认连接随程序构建的样例数据库，随后持续接收自然语言问题。已连接的数据库在整个会话中保留，每个问题重新建立 AI 上下文；查询结果或错误显示后继续提示 `你：`。
 
-JSON 模式示例：
+输入 `/demo` 无需 API Key 即可体验本地 SQL 纠错，`/help` 查看引导，`/exit` 退出。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
 
-```bash
-./build/text2sql query --db ./data/company.sqlite \
-  --question "Count employees" --json > results/query.json
-./build/text2sql demo --repair --json --verbose
-```
+离线演示使用 `./build/text2sql demo`。Demo 不需要 API Key 或联网，先执行错误字段 `department_name`，随后修正 JOIN 聚合。SQLite 实际返回 Engineering 115000、Finance 95000、Marketing 82500；内置数据与 `examples/demo.sql` 对应。
 
-一次性调用 stdout 只含一个 JSON 文档，包含 `success`、`answer`、`query`、`termination`、统计和 trace。`query` 含 SQL、columns、rows、error、execution_ms、truncated、query_id 等。行值保留数字、字符串和 NULL；BLOB 输出 `{"blob_hex":"..."}`。错误也以 JSON 返回，日志进入 stderr，无 ANSI。REPL 的 `--json` 为每次操作输出一个 JSON 文档（JSONL），不输出欢迎语和提示符。结果过长时标记截断；纯文本中的长单元格简化显示，JSON 保留已读取的完整值。
+## Benchmark 和 CSV
 
-退出码：0 成功；1 查询或运行失败；2 参数或配置错误；130 用户取消。REPL 单次操作错误会显示并继续，正常退出仍为 0。SQL 执行成功不等于问题答案已通过语义验证。
-
-## Spider 1.0 Benchmark
-
-从 [Spider 官方网站](https://yale-lily.github.io/spider) 的 Dataset 下载入口获取数据；官方 [GitHub](https://github.com/taoyds/spider) 主要提供评价代码，克隆它不等于获得数据库包。将下载包解压后的内容放入：
+完整 Spider 已包含在 `data/spider.zip`。CMake 配置时自动解压到 `build/data/spider`，其中包含全部开发/训练/测试题目、206 个不重复 SQLite 库、表元信息和标准 SQL。数据文件来源与校验清单见 [数据说明](data/README.md)。
 
 ```text
-data/spider/
-├── dev.json
-├── train_spider.json       # 可选
-├── train_others.json       # 可选
-├── tables.json            # 官方元数据；本程序直接读取 SQLite Schema
-└── database/
-    └── <db_id>/
-        └── <db_id>.sqlite
+仓库 data/
+├── company.sqlite
+├── sample-spider/          # 2 道中文题及对应数据库
+├── spider.zip             # 约 57 MiB，普通 Git 文件
+├── spider-manifest.json
+└── SHA256SUMS
 ```
 
-不要将完整数据集或用户数据库提交。程序使用 `question`、`db_id`、`query` 字段；标准 SQL 只用于本地评价，不送给模型。开发集是默认 split，`--split train` 对应 `train_spider.json`。
+构建结果中的 `data/` 包含展开后的数据。复制程序时同时复制旁边的 `data/`；安装时程序和数据会一起安装。
+
+通过独立命令启动评测，数据集目录留空使用内置完整 Spider，再输入划分（默认 dev）、题数（默认 20）和 CSV 路径（留空自动生成）：
 
 ```bash
-./build/text2sql benchmark --dataset ./data/spider --split dev --limit 20
-
-./build/text2sql benchmark --dataset ./data/spider --split dev --limit 20 \
-  --mode both --output results/spider-dev-20.jsonl \
-  --predictions results/spider-dev-20 --json
+./build/text2sql benchmark
+# 指定 JSON 配置
+./build/text2sql --config config.json benchmark
 ```
 
-`--mode baseline`：一次发送完整 Schema，生成并执行一个 SQL，不修正。`--mode agentic`（默认）：动态 Schema 探索、工具调用和有限修正。`--mode both` 对每题串行执行两个模式，统计分别输出。
+支持 dev、train_spider、train_others 和 test；train 是 train_spider 的别名。
 
-导出 JSONL 包含运行 metadata、逐题结果和末尾 summary，记录 SQL 执行成功率、本地结果一致率、平均模型轮次、SQL 尝试次数、耗时、可获取的 token 使用量以及可比较题数。输出文件默认自动命名，已存在的文件不会覆盖。
+每题串行比较两种方式：
 
-默认另导出 `SQL<TAB>db_id` 预测文本；`both` 对上述示例生成 `results/spider-dev-20.baseline.sql` 和 `results/spider-dev-20.agentic.sql`。可与 [官方 Test Suite 评价工具](https://github.com/taoyds/test-suite-sql-eval) 使用；本项目主程序不依赖该工具或 Python。按 case index 对齐同一 split/limit 的标准答案。取消或 API 错误会保存部分结果，务必先检查题数，API 错误不自动重试。
+- `baseline`：AI 生成并执行一次 SQL。
+- `corrected`：相同问题与结构，失败后修正，总共最多三次执行。
 
-**本地结果一致率不是 Spider 官方 Test Suite Accuracy。** 比较保留重复行，外层 ORDER BY 时保留顺序，其他情况忽略行顺序；列按位置比较，数值容差 `1e-9`。评价结果上限 100000 行/16 MB，截断不判一致。标准答案失败记录为不可比较，率的分母仍为实际尝试的题数。结果一致不能证明跨数据实例的 SQL 语义等价。
+CSV 为 UTF-8，字段为 `question,db_id,mode,sql,executed,matched,error`。成功标记为 1，失败为 0；标准 SQL 失败、评测结果截断或无法比较时，`matched` 留空并记录错误。文本字段正确引用逗号、双引号和换行，已存在的输出文件不会覆盖。
 
-## 安全与隐私
+终端汇总每种模式的题数、执行成功率和结果一致率。分母是该模式实际尝试的题数。API 或输出错误会停止评测，并保留已写入的 CSV；请检查实际行数。
 
-SQLite 文件只读打开，使用 prepare_v3、stmt_readonly、authorizer、progress handler、defensive、关闭 trusted schema 和扩展加载共同控制。拒绝写入、DDL、ATTACH/DETACH、未授权 PRAGMA、多条语句和未知 SQL 函数；合法 JOIN、CTE、聚合和窗口函数可用。不是按 `SELECT` 前缀判断安全。详见 [技术说明](docs/design.md)。
+结果按列位置比较。标准 SQL 有外层 ORDER BY 时保留顺序，否则排序行号后比较并保留重复行。数值使用相对容差 1e-9，截断结果不判一致。评测最多读取 100000 行/16 MB。标准 SQL 只用于本地比较，不发送给模型。
 
-默认只发送问题、Schema 和有限工具预览，不上传数据库文件。数据库内容属于不可信数据，提示不允许覆盖系统指令；执行权限始终由 SQLite 强制限制。真实查询会发送工具选中记录的预览，请只查询可以发送给所配置 API 的数据。
+这是本地结果一致率，不是 Spider 官方 Test Suite Accuracy。
 
-libcurl 在当前进程内发送 HTTPS，请求不经过 shell 或子进程。API Key 仅进入内存中的认证头，不写临时文件或命令行；禁用重定向，强制 TLS 证书和主机名校验，并限制连接时间、总时间和解压后的响应大小。API 错误正文不进入日志。
+## 执行边界和目录
 
-## 目录与依赖
+SQLite 文件只读打开；保留 authorizer、query_only、defensive、trusted_schema=OFF、多语句拒绝、函数白名单、查询超时和结果大小上限。合法 JOIN、CTE、聚合和窗口函数可以使用。HTTPS 请求在进程内由 libcurl 发送，校验证书、不跟随重定向，限制时间与解压后的响应大小，密钥不进入日志或命令行。
+
+模型接收问题、表结构和 SQL 执行错误，系统提示词使用中文。程序不上传数据库文件或查询结果行，不支持写数据库。API Key 是使用者的本地配置，不随仓库提供；无需密钥的 `/demo` 始终可用。
 
 ```text
-.
-├── CMakeLists.txt, README.md, LICENSE, config.example.json
-├── src/
-│   ├── main.cpp, common.h, config.h, config.cpp
-│   ├── database.h, database.cpp
-│   ├── llm.h, llm.cpp, agent.h, agent.cpp
-│   └── benchmark.h, benchmark.cpp, demo.h.in
-├── third_party/
-│   ├── sqlite/sqlite3.c, sqlite3.h
-│   ├── json/json.hpp, LICENSE.MIT
-│   └── README.md, SHA256SUMS
-├── examples/demo.sql
-├── tests/tests.cpp, benchmark_tests.cpp, cli_tests.cmake
-├── .github/workflows/ci.yml
-├── docs/design.md, validation.md
-├── data/.gitkeep
-└── results/.gitkeep
+src/
+├── main.cpp                 # 启动和 Windows 参数适配
+├── common.cpp, config.cpp   # 结构体、JSON 配置
+├── database.cpp, agent.cpp  # SQLite、固定纠错
+├── llm.cpp, json.cpp        # HTTPS、JSON 协议
+├── benchmark.cpp, files.cpp # CSV 评测、文件读取
+└── cli.cpp, demo.cpp        # 查询输入、演示数据
 ```
 
-项目 MIT；SQLite 3.50.4 为公有领域；nlohmann/json 3.12.0 为 MIT；libcurl 使用 curl license。版本、来源和 SHA-256 校验值见 `third_party/`。没有 AI 框架和 UI 依赖。
+`main.cpp` 按顺序包含模块，CMake 只编译入口。第三方库自带的头文件保留，版本和校验值见 `third_party/`。随仓库数据由 `.gitignore` 明确放行，本地密钥、用户数据库、解压数据及结果文件继续忽略。GitHub Actions 保留三个平台的构建和离线 Demo。
 
-## 验证与限制
+当前实际验证见 [验证记录](docs/validation.md)，更多执行细节见 [技术说明](docs/design.md)。[历史阶段报告](docs/project-report.md) 与 PDF 记录旧动态工具版本的实验，结果不代表当前固定纠错流程。
 
-CTest 覆盖真实 SQLite 安全/查询行为、Mock Agent 修正和停止条件、HTTPS URL 强制、CLI 帮助和 Demo，以及带中文路径的 Spider 格式 fixture、Baseline/Agentic 对照和导出。GitHub Actions 配置了 Ubuntu、macOS 和 Windows/MSVC 三个平台；CI 不读取真实 API Key。
-
-```bash
-cmake -S . -B build-sanitize -DTEXT2SQL_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-sanitize -j 4
-ctest --test-dir build-sanitize --output-on-failure
-```
-
-当前机器的实际验证结果见 [验证记录](docs/validation.md)。libcurl 网络层已完成真实 DeepSeek Tool Calling；官方 Spider dev 前 3 题已跑 Baseline/Agentic 小规模验证。3 题全部来自同一数据库，只证明链路正确，不代表完整 dev 准确率，也不是官方 Test Suite Accuracy。
-
-macOS 已完成本地与远端验证；GitHub Actions 的 Ubuntu、macOS、Windows/MSVC 三个平台均已实际通过配置、编译、5 项 CTest 和离线修正 Demo。不支持写数据库、TUI、流式输出、模型训练或官方测试集排行榜提交。SQL 函数白名单、资源上限和严格双引号规则可能拒绝部分合法但超出当前范围的查询。SQLite 防护是进程内机制，极端恶意或损坏数据库不等价于被隔离在 OS 沙箱内。终端对齐只做轻量 UTF-8 处理。
+项目 MIT；SQLite 为公有领域，cJSON 为 MIT，libcurl 使用 curl license。

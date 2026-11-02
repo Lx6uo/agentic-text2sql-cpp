@@ -1,53 +1,116 @@
-#include "config.h"
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <stdexcept>
-namespace t2s {
-namespace {
-void number(const Json& j,const char* name,int& dest,int min,int max) {
-    if(!j.contains(name)) return;
-    if(!j[name].is_number_integer()) throw std::runtime_error(std::string("Config: expected integer for ")+name);
-    auto value=j[name].get<int64_t>();
-    if(value<min || value>max) throw std::runtime_error(std::string("Config: out of range: ")+name);
-    dest=static_cast<int>(value);
+// 配置只在读取 JSON 时使用库指针，其余代码使用 Config 结构体。
+bool config_number(cJSON *object, const char *name, int *destination, int minimum, int maximum,
+                   string *error) {
+    cJSON *value = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (value == nullptr) return true;
+    if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble) ||
+        floor(value->valuedouble) != value->valuedouble) {
+        *error = string("Config: expected integer for ") + name;
+        return false;
+    }
+    if (value->valuedouble < minimum || value->valuedouble > maximum) {
+        *error = string("Config: out of range: ") + name;
+        return false;
+    }
+    *destination = (int)value->valuedouble;
+    return true;
 }
-void string_value(const Json& j,const char* name,std::string& dest) {
-    if(!j.contains(name)) return;
-    if(!j[name].is_string()) throw std::runtime_error(std::string("Config: expected string for ")+name);
-    dest=j[name].get<std::string>();
+bool config_string(cJSON *object, const char *name, string *destination, string *error) {
+    cJSON *value = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (value == nullptr) return true;
+    if (!cJSON_IsString(value)) {
+        *error = string("Config: expected string for ") + name;
+        return false;
+    }
+    *destination = value->valuestring;
+    return true;
 }
+bool read_api_config(cJSON *object, ApiOptions *api, string *error) {
+    if (!config_string(object, "base_url", &api->base_url, error)) return false;
+    if (!config_string(object, "model", &api->model, error)) return false;
+    if (!config_string(object, "api_key", &api->api_key, error)) return false;
+    if (!config_number(object, "timeout_seconds", &api->timeout_seconds, 1, 600, error))
+        return false;
+    return config_number(object, "max_tokens", &api->max_tokens, 1, 32768, error);
 }
-Config load_config(const std::string& path,bool required) {
-    Config c;
-    auto native_path=path_from_utf8(path);
-    if(std::filesystem::exists(native_path)) {
-        if(std::filesystem::file_size(native_path)>65536) throw std::runtime_error("Config file exceeds 64 KB");
-        std::ifstream in(native_path);
-        if(!in) throw std::runtime_error("Cannot read config file");
-        Json j; try{in>>j;}catch(...){throw std::runtime_error("Invalid config JSON");}
-        if(!j.is_object()) throw std::runtime_error("Config must be a JSON object");
-        for(auto key:{"api","agent","database"}) if(j.contains(key)&&!j[key].is_object()) throw std::runtime_error("Config sections must be objects");
-        if(j.contains("api")) {
-            auto& a=j["api"];string_value(a,"base_url",c.api.base_url);string_value(a,"model",c.api.model);string_value(a,"api_key",c.api.api_key);
-            number(a,"timeout_seconds",c.api.timeout_seconds,1,600);number(a,"max_tokens",c.api.max_tokens,1,32768);
+bool read_agent_config(cJSON *object, AgentOptions *agent, string *error) {
+    if (!config_number(object, "max_steps", &agent->max_steps, 1, 100, error)) return false;
+    if (!config_number(object, "max_sql_attempts", &agent->max_sql_attempts, 1, 100, error))
+        return false;
+    return config_number(object, "max_repairs", &agent->max_repairs, 0, 99, error);
+}
+bool read_database_config(cJSON *object, DatabaseOptions *db, string *path, string *error) {
+    if (!config_string(object, "path", path, error)) return false;
+    if (!config_number(object, "timeout_ms", &db->timeout_ms, 1, 600000, error)) return false;
+    if (!config_number(object, "max_display_rows", &db->max_display_rows, 1, 10000, error))
+        return false;
+    if (!config_number(object, "max_preview_rows", &db->max_preview_rows, 1, 100, error))
+        return false;
+    if (!config_number(object, "max_sql_bytes", &db->max_sql_bytes, 1, 65536, error)) return false;
+    return config_number(object, "max_result_bytes", &db->max_result_bytes, 1024, 16777216, error);
+}
+ConfigResult load_config(string path, bool required) {
+    ConfigResult result;
+    if (file_exists(path)) {
+        TextResult text = read_text(path, 65536);
+        if (!text.success) {
+            result.error = text.error;
+            return result;
         }
-        if(j.contains("agent")) {
-            auto& a=j["agent"];number(a,"max_steps",c.agent.max_steps,1,100);number(a,"max_sql_attempts",c.agent.max_sql_attempts,1,100);number(a,"max_repairs",c.agent.max_repairs,0,99);
+        if (json_has_nul_escape(text.text)) {
+            result.error = "Config JSON contains NUL";
+            return result;
         }
-        if(j.contains("database")) {
-            auto& d=j["database"];number(d,"timeout_ms",c.database.timeout_ms,1,600000);
-            number(d,"max_display_rows",c.database.max_display_rows,1,10000);number(d,"max_preview_rows",c.database.max_preview_rows,1,100);
-            number(d,"max_sql_bytes",c.database.max_sql_bytes,1,65536);number(d,"max_result_bytes",c.database.max_result_bytes,1024,16777216);
+        cJSON *object =
+            cJSON_ParseWithLengthOpts(text.text.c_str(), text.text.length() + 1, nullptr, true);
+        if (!cJSON_IsObject(object)) {
+            cJSON_Delete(object);
+            result.error = "Config must be a valid JSON object";
+            return result;
         }
-    } else if(required) throw std::runtime_error("Config file not found");
+        const char *names[] = {"api", "agent", "database"};
+        for (int i = 0; i < 3; i++) {
+            cJSON *section = cJSON_GetObjectItemCaseSensitive(object, names[i]);
+            if (section == nullptr) continue;
+            if (!cJSON_IsObject(section)) {
+                result.error = "Config sections must be objects";
+                break;
+            }
+            bool valid = false;
+            if (i == 0) valid = read_api_config(section, &result.config.api, &result.error);
+            if (i == 1) valid = read_agent_config(section, &result.config.agent, &result.error);
+            if (i == 2)
+                valid = read_database_config(section, &result.config.database,
+                                             &result.config.database_path, &result.error);
+            if (!valid) break;
+        }
+        cJSON_Delete(object);
+        if (!result.error.empty()) return result;
+        if (!result.config.database_path.empty()) {
+            fs::path database = fs::u8path(result.config.database_path);
+            if (database.is_relative())
+                result.config.database_path =
+                    (fs::u8path(path).parent_path() / database).u8string();
+        }
+    } else if (required) {
+        result.error = "Config file not found";
+        return result;
+    }
 #ifdef _WIN32
-    char* key=nullptr;size_t length=0;
-    if(_dupenv_s(&key,&length,"DEEPSEEK_API_KEY")==0&&key){c.api.api_key=key;std::free(key);}
+    char *key = nullptr;
+    size_t length = 0;
+    if (_dupenv_s(&key, &length, "DEEPSEEK_API_KEY") == 0 && key != nullptr) {
+        result.config.api.api_key = key;
+        free(key);
+    }
 #else
-    if(const char* key=std::getenv("DEEPSEEK_API_KEY"))c.api.api_key=key;
+    const char *key = getenv("DEEPSEEK_API_KEY");
+    if (key != nullptr) result.config.api.api_key = key;
 #endif
-    if(c.api.model.empty()) throw std::runtime_error("Model must not be empty");
-    return c;
-}
+    if (result.config.api.model.empty()) {
+        result.error = "Model must not be empty";
+        return result;
+    }
+    result.success = true;
+    return result;
 }

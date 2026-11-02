@@ -1,6 +1,94 @@
 # 实际验证记录
 
-验证日期：2026-10-21。平台：macOS arm64，Apple Clang 21.0.0，CMake 4.4.4，libcurl 8.7.1。此文件记录实际执行结果，具体耗时随机器变化。
+## 当前版本：随 clone 提供数据库和数据集
+
+仓库加入默认样例 SQLite、两题中文评测数据和 59,773,171 字节的 Spider ZIP。压缩包保留 206 个不重复数据库、dev 1034 题、train_spider 7000 题、train_others 1659 题和 test 2147 题，以及元信息和标准 SQL。CMake 自动解压到构建目录，不需要 Git LFS、Python 或额外下载数据。
+
+实际验证：
+
+- 所有归档文件与来源 SHA-256 一致，206 个 SQLite 文件均以只读方式打开成功，全部题目 db_id 都有对应数据库。
+- 新规则放行内置数据，继续忽略本地配置、用户数据库、SQLite WAL/SHM、解压数据和结果。新增 Git 文件均小于 100 MiB。
+- 使用当前完整源码和数据建立临时 Git 提交，再执行干净本地 clone。克隆后 C++17 构建成功，不配置 API Key 也能自动连接样例库并通过 `/demo` 离线体验。
+- Benchmark 数据路径留空使用内置完整 Spider。官方 dev 第一题真实 AI 对照中，Baseline 与纠错模式均执行成功并匹配标准结果，CSV 两行完整。
+- 安装后移动整个安装目录，程序仍找到样例数据库和完整 Spider，离线 Demo 成功；源构建目录的位置不影响数据定位。
+- 未变化的归档不会重复解压。验证在 macOS 完成，Windows 多配置与安装目录适配保留。
+
+## 历史版本：直接自然语言输入
+
+启动后直接显示数据库连接、引导和 `你：` 提示，没有数字菜单。数据库由 `--db` 或 JSON 的 `database.path` 自动连接；配置中的相对路径以配置目录为基准。未设置时只询问一次路径，随后持续接收问题。Benchmark 使用独立启动命令，Demo 和 Windows 支持保留。
+
+本次 C++17 构建成功，10 项交互检查通过，覆盖自动连接、配置相对路径、参数优先、引导、退出、启动错误、缺少密钥和离线 Demo。实际连续输入两个中文问题并完成真实 AI 查询：员工总数为 6，各部门平均工资与样例一致，数据库 SHA-256 未改变。Windows 参数转换实现核对保留。
+
+体验窗口已重新启动并自动连接样例库；体验构建和数据库放在源码目录外。项目 CPP 为 1823 行，没有自写头文件或测试目录。
+
+## 历史版本：课程精简版，保留 JSON 配置和 Windows
+
+项目自己的 CPP 从 3497 行降到 **1785 行**，减少 1712 行（约 49%）。查询改为固定的 Schema → SQL → 执行/纠错流程，总共最多三次；交互为简单菜单，Benchmark 输出 Baseline/纠错模式的 CSV 和汇总。JSON 配置、Windows/macOS/Linux 适配、只读限制、超时、结果上限和基础语法保留。
+
+本次实际验证：
+
+- C++17 普通与 ASan/UBSan 构建成功，临时目录中的 **50 项检查通过**，没有 sanitizer 错误。覆盖只读与多语句限制、超时、取消、动态数组、64 位整数、NULL/BLOB/NUL 文本、结构读取、排序比较、固定纠错及三次硬上限。
+- **10 项菜单和配置检查通过**：菜单/独立 Demo、JSON 配置和中文路径、旧配置更低限制、非法配置不输出敏感值、CSV 拒绝覆盖已有文件，以及无测试目标的构建。
+- 两个中文样例问题真实运行 Baseline 和纠错模式，均为 **2/2 执行成功、2/2 与标准结果一致**。CSV 为四条完整记录，SQLite 文件 SHA-256 未改变。
+- Windows UTF-16 参数转换实现与上一版本一致，MSVC、UTF-8、Shell32 和静态运行库设置均保留；本次运行验证在 macOS arm64 完成，没有实际运行 Windows。
+- 自写 CPP 语法检查、第三方 SHA-256 和 `git diff --check` 通过。没有恢复自写头文件或测试目录。临时构建、样例库、CSV 和检查程序验证后清除，源码目录保持干净。
+
+上述样例只验证流程，不代表完整 Spider 准确率。以下为先前版本的历史记录。
+
+## 历史版本：等级 2，适当使用简单指针
+
+本次重写把数据库查询、模型回复、Agent 和 Benchmark 结果改成普通结构体；行数据使用动态数组，通过简单指针传递。普通错误用返回值表示，自写源码不使用引用参数、异常、三元表达式、模板定义、Lambda、智能指针、`vector/map/set`、`auto` 或 `.get<T>()`。JSON 依赖改为固定版本 cJSON 1.7.19；SQLite 和中文系统提示词继续保留。
+
+实际验证结果：
+
+- C++17 普通构建和 ASan/UBSan 构建成功。
+- 临时目录中的 **56 项检查全部通过**，没有 sanitizer 错误。覆盖只读限制、语句释放、超时、取消、动态数组扩容、64 位整数 JSON 精度、NULL/BLOB/含 NUL 文本、结果排序比较、Schema 注入拒绝、打开失败保留连接，以及 Mock 纠错和停止条件。
+- **7 项 CLI 检查通过**，覆盖正常与纠错 Demo、参数错误、配置错误不输出敏感字段、JSONL REPL 和无测试目标的构建。
+- 两个中文问题使用真实 AI 运行 Baseline/Agentic 对照；两种模式均为 **2/2 执行成功、2/2 与标准结果一致**。JSONL 和预测文件各项数正确，查询前后 SQLite SHA-256 一致。
+- 全部项目 CPP 的语法扫描和第三方 SHA-256 校验通过。没有恢复自写头文件或测试目录，验证材料均放在源码目录外，验证后清除。
+
+这些真实 AI 问题来自临时样例数据库，用于验证重写后的流程，并不代表完整 Spider 准确率。以下为先前版本的历史记录。
+
+## 历史版本：移除测试目录，使用中文系统提示词
+
+项目已移除 `tests/` 目录、CMake 测试目标和 CI 中的 CTest 步骤。Agent 与 Baseline 的系统提示词已改为中文，保留只读 SQL、真实 Schema、结果列数和行数、有限纠错等约束。
+
+本次在源码目录外完成 C++17 构建，只生成主程序和 SQLite 依赖库。离线 SQLite 纠错 Demo、Schema 查看与 CLI 帮助均验证成功。使用临时样例数据库进行一题真实 AI 对照评测，Agentic 和 Baseline 都执行成功并与标准结果一致，员工总数为 6；查询前后数据库 SHA-256 一致。
+
+临时验证的源码外构建、数据库和结果已经清除。以下内容均为移除测试目录前的历史记录，其中的 CTest 命令和测试程序对应当时的版本；当前构建及运行方式以 README 为准。
+
+## 移除测试前：仅 CPP 的分模块版本
+
+当前项目按功能拆成 9 个 CPP，`main.cpp` 为 156 行，只保留入口和主流程。`common.cpp` 保存共用结构体和声明，各模块由入口统一包含；项目没有自写或生成的头文件。
+
+本次在源码目录外完成 C++17 构建，CTest **5/5 通过**，包括 **77 项核心检查**和 **21 项 Benchmark 检查**。在不同工作目录运行离线纠错 Demo，SQLite 先返回字段不存在，再完成正确查询，结果为 Engineering 115000、Finance 95000、Marketing 82500。
+
+所有功能 CPP 扫描继续满足 B 级语法要求；`demo.cpp` 中内置 SQL 与 `examples/demo.sql` 一致。以下为此前基础版本的验证记录。
+
+## 移除测试前：B 级基础 C++ 版本
+
+当前重构版本在 macOS arm64 / Apple Clang 21 / libcurl 8.7.1 上验证：
+
+- C++17 普通构建 `build-basic`：CTest **5/5 通过**。
+- ASan/UBSan 构建 `build-basic-sanitize`：CTest **5/5 通过**，没有 sanitizer 错误。
+- 两种构建均完成 **77 项核心检查**和 **21 项 Benchmark 检查**。新增检查覆盖打开失败保留原连接、查询语句释放、显式关闭连接，以及关闭后的查询和 Schema 错误。
+- 离线纠错 Demo 先收到 `no such column: department_name`，随后真实 SQLite 查询成功，返回 Engineering 115000、Finance 95000、Marketing 82500；2 次 SQL 尝试、1 次修正。
+- 真实 DeepSeek 查询演示数据库员工总数，返回 `6`，终止原因为 `completed`，消耗 3766 tokens。查询前后 SQLite 文件 SHA-256 一致。
+- 自写 `src/` 和 C++ 测试源码扫描未发现类定义、模板定义、Lambda、智能指针、`std::function`、`vector/map/set`、`auto` 类型推导或范围 `for`。库内部实现和 JSON 的模板接口调用继续保留。
+- `git diff --check` 通过。此次验证在本地 macOS 完成；下面的远端 CI 结果属于先前版本。
+
+```bash
+cmake -S . -B build-basic
+cmake --build build-basic -j 4
+ctest --test-dir build-basic --output-on-failure
+./build-basic/text2sql demo --repair --verbose
+
+cmake -S . -B build-basic-sanitize -DTEXT2SQL_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-basic-sanitize -j 4
+ctest --test-dir build-basic-sanitize --output-on-failure
+```
+
+以下为先前版本的历史验证：日期 2026-10-21。平台：macOS arm64，Apple Clang 21.0.0，CMake 4.4.4，libcurl 8.7.1。具体耗时随机器变化。
 
 ## 构建和测试
 

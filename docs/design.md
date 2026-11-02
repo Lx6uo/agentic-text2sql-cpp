@@ -1,45 +1,41 @@
-# 技术说明
+# 课程精简版技术说明
 
-这是单控制器 CLI：`main` 负责参数、REPL 和展示，`database` 管理 SQLite，`llm` 负责 curl 和响应校验，`agent` 执行工具循环，`benchmark` 加载 Spider 并比较结果。使用 `std::function` 在同一个 Agent 中切换真实 API 和 Mock；不包含多 Agent、框架、服务器或本地模型。
+项目使用多个 CPP 和普通结构体，`main.cpp` 统一包含模块。默认启动直接进入自然语言输入，会话复用数据库连接，各问题重建模型上下文；Benchmark 使用独立命令。保留 JSON 配置、Windows 适配、SQLite、真实 API、固定纠错和 CSV Benchmark；不包含自写头文件或测试目录。
 
-## 工具调用与停止
+## 固定查询流程
 
-每个问题从新的 system/user 上下文开始。LLM 每轮自行选择零个或多个工具；C++ 保留完整 assistant 消息，按原 `tool_call_id` 加入每个执行结果。三个工具独立可调用，未固定数据库、字段映射或调用顺序。
+`run_query` 先读取真实表结构，包括字段类型、非空约束、主键及外键，再用中文系统提示词要求 AI 返回一条只读 SQL。普通会话消息包含问题、结构和后续 SQL 错误，没有工具定义、tool_call_id、token 统计或 trace。
 
-- `list_tables` 返回真实表和视图。
-- `describe_tables` 验证所选表名，读取字段、复合主键序号和外键。标识符用 SQLite 双引号转义。
-- `execute_sql` 返回成功标志、SQL、列、类型化行、错误、执行时间、截断、查询编号、超时及取消标志。最多保留 100 行给本地显示，默认仅 10 行进入模型上下文；工具预览另有限制 32 KB。
+成功执行 SQL 就停止。执行失败时把错误作为新的用户消息交给模型；模型调用与 SQL 尝试总共最多三次，Baseline 只尝试一次。API/回复错误停止，不自动重试网络请求。旧配置中的较低轮数、执行次数或纠错上限仍会限制最终次数。
 
-`max_steps` 按模型请求轮次计算，一轮可有多个工具，另记录 `tool_calls`。默认最多 8 轮、3 次 SQL 执行、2 次错误修正。失败后的下一次 SQL 执行算一次修正；成功后重新查询只计 SQL 尝试。达到执行额度仍可读取 Schema 或给出最终回复；再次要求执行则终止。模型结束且最后一次 SQL 成功才设置 Agent `success=true`。执行成功仅代表 SQL 可执行。
+AI 输入不含标准答案 SQL 或查询结果行。系统提示词将数据库结构视为数据；执行权限由 SQLite 控制。SQL 执行成功不代表问题语义一定正确。
 
-停止原因记录在 `termination`：`completed`、`unable_to_answer`、`step_limit`、`sql_attempt_limit`、`repair_limit`、`context_limit`、`api_error`、`cancelled`。非法工具或参数返回结构化错误供模型改正，仍受轮次上限约束。重复 ID、异常 API 信封或空回复终止。API 不自动重试，避免隐式付费和重复执行；Benchmark 遇到 API 错误保存已有记录并停止。
+## SQLite 和资源限制
 
-## SQLite 安全边界
+用户文件以 SQLITE_OPEN_READONLY 打开，Demo 单独创建内存库后切为只读。保留 query_only、defensive、trusted_schema=OFF、扩展加载禁用、语句只读检查、多语句拒绝和函数白名单；写入、DDL、ATTACH、事务、PRAGMA 和未知函数被拒绝。CTE、JOIN、聚合与窗口函数继续可用。
 
-文件连接使用 `SQLITE_OPEN_READONLY`，关闭 URI 模式。设置 defensive、trusted_schema=OFF、query_only=ON，禁用扩展加载；SQL 由 `sqlite3_prepare_v3` 编译，解析尾部以拒绝第二条语句，然后检查 `sqlite3_stmt_readonly`。authorizer 只允许 SELECT、READ、递归查询和明确白名单内的普通计算/聚合/窗口/JSON 函数。写入、DDL、ATTACH/DETACH、事务、PRAGMA 和未知函数均拒绝。只读查询中的 CTE、JOIN 和窗口函数正常使用。
+内部 Schema 查询只使用固定 SQL 和转义后的真实表名，临时放行 authorizer，随后恢复。查询准备、执行和结果读取都受截止时间约束，progress handler 检查取消和超时。SQL 长度、表达式、列数、单值和总结果均有限制；截断标记保留，错误清除不完整行。
 
-Schema 内部查询短暂放行 authorizer，输入仅来自程序固定查询和经过表名单验证的引用标识符；这个路径不接受模型 SQL。公开执行工具不能获得内部权限。
+查询结果保留 SQLite 类型、整数、小数、文本、NULL 和 BLOB。动态数组通过普通指针传递，调用方显式释放；结构体不定义构造/析构函数或成员函数。
 
-progress handler 每 1000 条 VM 指令检查 SIGINT 和单查询截止时间，准备及读取完成后也检查截止时间。Schema 内部读取同样受截止时间、最多 10000 条和 1 MB 约束。配置 busy timeout；限制 SQL 16 KB、单值 1 MB、列数 128、表达式深度 100、联合 SELECT 20、VM 指令分配 250000。默认本地结果序列化上限 1 MB，超出返回 `truncated=true`。超时和取消清空不完整行，返回失败。该机制是 SQLite 级防护，不是独立操作系统沙箱；极端恶意或损坏数据库仍受进程和 SQLite 本身边界影响。
+## JSON 配置、HTTP 与 Windows
 
-## HTTP 与密钥
+配置支持 api、agent、database 三个部分，字段类型与范围被检查，环境变量优先于文件，包括空环境变量。`database.path` 指定启动数据库，相对路径以配置目录为基准；`--db` 参数优先。未指定时连接内置样例库；默认数据优先从程序旁边查找，支持 Windows 多配置构建和安装布局，最后回退到构建目录。错误不输出 JSON 内容或密钥。
 
-使用 libcurl easy API 在进程内请求，不调用 shell，也不创建网络子进程。请求体和认证头只存在于内存；API Key 不进入命令行、临时文件或日志。CMake 通过 `CURL::libcurl` 链接系统/包管理器提供的 libcurl，Windows 推荐 vcpkg 静态 triplet。
+libcurl 在进程内发送 HTTPS，禁止重定向，校验证书链和主机名，限制连接时间、总时间和解压后 2 MB 响应，忽略 netrc，并检查取消。认证头仅在内存中，不进入 argv、临时文件或日志；API 错误正文不输出。JSON 由固定版本 cJSON 处理。
 
-libcurl 仅允许 HTTPS，不跟随重定向，启用证书链与主机名校验。连接/总请求超时、Content-Length 和写回调共同限制响应；写回调按解压后的数据强制最多 2 MB。只接受 2xx，错误响应正文不进入日志。progress callback 检查 SIGINT 并取消请求。API body 包含 `stream=false`、`thinking.type=disabled` 和有工具时的 `tool_choice=auto`。不输出或要求完整思维链。
+Windows 使用 CommandLineToArgvW 和 WideCharToMultiByte，把原生 UTF-16 参数转为 UTF-8，并设置 UTF-8 控制台。文件流使用 C++17 filesystem，SQLite 接收 UTF-8 路径；MSVC、Shell32、vcpkg 静态 curl 和静态运行库配置保留。
 
-Windows 使用 `CommandLineToArgvW` 获取原生 UTF-16 参数，再严格转换为 UTF-8；SQLite 接收 UTF-8 文件名，文件流使用 `std::filesystem::path`。Ctrl+C 使用标准 `std::signal`，终端检测分别使用 `_isatty` 和 POSIX `isatty`。Benchmark 输出使用跨平台 `std::ofstream`，已存在的结果仍拒绝覆盖。
+## CSV Benchmark
 
-配置环境变量优先于文件，空环境变量也覆盖文件值。配置解析失败不复述可能含密钥的 JSON 内容。示例密钥为空，实际配置和数据库不提交。
+使用相同问题、同一数据库，依次运行 Baseline 和纠错模式。生成预测后，才在本地独立只读连接执行标准 SQL。标准连接支持旧 Spider 双引号字符串写法，预测连接继续严格检查标识符。
 
-模型收到用户问题、所请求的 Schema 和有限工具预览。提示明确把数据库内容当作不可信数据。模型提示不能保证免受提示注入，但 SQLite 授权和资源限制始终在 C++ 执行层强制实施。
+评测连接最多读取 100000 行/16 MB。比较列位置与数量，外层 ORDER BY 存在时比较行顺序，否则用 O(n log n) 归并排序排序行号，保留重复次数。数字使用相对容差 1e-9，字符串与数字不同，NULL 只等于 NULL。截断或失败时不判一致。
 
-## 本地评价
+CSV 每行包含问题、db_id、模式、预测 SQL、执行成功标记、一致标记和错误。文本引用逗号、引号和换行，已存在的输出拒绝覆盖。无法比较时一致标记留空；数据库、参考或评测查询错误也记录在 CSV。API 或文件写入错误停止并保留已有记录。
 
-Baseline 把完整 Schema 和问题发送一次，不使用工具、不修正。Agentic 使用同一 Agent。标准 SQL 在模型执行结束后，单独用于评价，绝不作为 Agent 输入。评价连接限制 100000 行、16 MB 总结果；超限记录为不可比较，不能用截断前缀判定正确。
+终端汇总各模式实际题数、执行成功率和本地结果一致率。该结果不是 Spider 官方 Test Suite Accuracy，也不能证明 SQL 跨数据实例语义等价。
 
-标准 SQL 独立连接开启历史双引号字符串兼容（Spider 官方示例存在此写法）；预测 SQL 连接始终关闭该兼容，以免列名拼写错误被当作字符串。两者均使用同样的只读 authorizer。
+## 随 clone 提供的数据
 
-比较列位置和数量，忽略列别名；标准 SQL 有外层 `ORDER BY` 时比较行顺序，否则排序比较保留重复次数。数字使用相对容差 `1e-9`，字符串与数字不同，NULL 只等于 NULL。空结果可能造成偶然一致；某些等价 SQL 会因列顺序而被判不同；浮点容差不代表任意 SQL 语义等价。这个指标仅是本地结果一致率，不是官方 Test Suite Accuracy。
-
-JSONL 保存 metadata、逐题 case 和 summary。summary 的率以各模式实际尝试题数为分母，另列可比较数和请求题数。取消或 API 失败会产生部分结果；必须核对 `cases` 和 `requested_cases_per_mode`。数据文件、路径或数据库等题级错误记录 `case_errors` 并使最终退出码为 1；有效运行中答案不一致仅影响指标。预测导出为每行 `SQL\tdb_id`，API 提前停止的文件只包含已尝试题目，应按 case index 对齐官方 gold。
+样例库以 SQLite 文件直接加入 Git，完整 Spider 运行数据保存在约 57 MiB 的 ZIP 文件，保留题目、数据库、元信息和标准 SQL 原始字节。CMake 根据压缩包 SHA-256 判断是否需要解压，解压位置为构建目录，安装时一并安装。Benchmark 默认使用解压后的完整 Spider；也附带两题样例数据。上游说明、范围和校验清单见 `data/README.md`。
