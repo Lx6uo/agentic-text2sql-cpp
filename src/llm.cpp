@@ -1,21 +1,17 @@
-// HTTPS 请求和 SQL 回复。
+// API 不做逐项预校验，统一判断请求是否成功并统一释放资源。
 const int response_limit = 2 * 1024 * 1024;
 struct ResponseBuffer {
     char *data = nullptr;
     size_t used = 0;
-    bool too_large = false;
 };
 size_t receive_response(char *data, size_t size, size_t count, void *context) {
+    // libcurl 分块回传响应，累积到固定缓冲区，超过上限就结束接收。
     ResponseBuffer *response = (ResponseBuffer *)context;
-    if (size != 0) {
-        if (count > (size_t)-1 / size) {
-            response->too_large = true;
-            return 0;
-        }
+    if (size != 0 && count > (size_t)-1 / size) {
+        return 0;
     }
     size_t bytes = size * count;
     if (bytes > response_limit - response->used) {
-        response->too_large = true;
         return 0;
     }
     memcpy(response->data + response->used, data, bytes);
@@ -24,104 +20,36 @@ size_t receive_response(char *data, size_t size, size_t count, void *context) {
     return bytes;
 }
 int http_progress(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-    if (cancelled) {
-        return 1;
-    }
-    return 0;
-}
-Status validate_api(ApiOptions *api) {
-    bool invalid_url = false;
-    if (api->base_url.compare(0, 8, "https://") != 0) {
-        invalid_url = true;
-    }
-    if (api->base_url.length() > 2048) {
-        invalid_url = true;
-    }
-    if (api->base_url.find_first_of("\r\n\t \"\\?#") != string::npos) {
-        invalid_url = true;
-    }
-    if (api->base_url.find('\0') != string::npos) {
-        invalid_url = true;
-    }
-    if (invalid_url) {
-        return failed_status("API base_url must be a plain HTTPS URL");
-    }
-    string host = api->base_url.substr(8, api->base_url.find('/', 8) - 8);
-    if (host.empty()) {
-        return failed_status("Invalid API host");
-    }
-    if (host.find('@') != string::npos) {
-        return failed_status("Invalid API host");
-    }
-    if (api->api_key.empty()) {
-        return failed_status("Missing API key: set DEEPSEEK_API_KEY or config.json");
-    }
-    if (api->api_key.length() > 4096) {
-        return failed_status("Invalid API key format");
-    }
-    for (int i = 0; i < (int)api->api_key.length(); i++) {
-        unsigned char c = api->api_key[i];
-        if (c < 33) {
-            return failed_status("Invalid API key format");
-        }
-        if (c == 127) {
-            return failed_status("Invalid API key format");
-        }
-    }
-    if (api->timeout_seconds < 1) {
-        return failed_status("Invalid API timeout");
-    }
-    if (api->timeout_seconds > 600) {
-        return failed_status("Invalid API timeout");
-    }
-    return ok_status();
+    return cancelled != 0;
 }
 TextResult curl_post(ApiOptions *api, string request) {
     TextResult result;
-    Status valid = validate_api(api);
-    if (!valid.success) {
-        return failed_text(valid.error);
-    }
-    if (cancelled) {
-        return failed_text("API request cancelled");
-    }
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
-        return failed_text("Cannot initialize libcurl");
+        return failed_text("API");
     }
     CURL *handle = curl_easy_init();
     curl_slist *headers = nullptr;
     ResponseBuffer response;
     response.data = new (nothrow) char[response_limit + 1];
-    if (handle == nullptr) {
-        result.error = "Cannot allocate HTTP request";
-    }
-    if (response.data == nullptr) {
-        result.error = "Cannot allocate HTTP request";
-    }
-    if (result.error.empty()) {
+    bool ready = handle != nullptr && response.data != nullptr;
+    if (ready) {
         response.data[0] = '\0';
         string authorization = "Authorization: Bearer " + api->api_key;
-        headers = curl_slist_append(nullptr, authorization.c_str());
+        const char *values[] = {authorization.c_str(), "Content-Type: application/json",
+                                "Accept: application/json"};
+        for (int i = 0; i < 3; i++) {
+            curl_slist *next = curl_slist_append(headers, values[i]);
+            if (next == nullptr) {
+                ready = false;
+                break;
+            }
+            headers = next;
+        }
         for (int i = 0; i < (int)authorization.length(); i++) {
             authorization[i] = '\0';
         }
-        if (headers == nullptr) {
-            result.error = "Cannot allocate HTTP headers";
-        }
-        const char *extra[] = {"Content-Type: application/json", "Accept: application/json"};
-        for (int i = 0; i < 2; i++) {
-            if (result.error.empty() == false) {
-                break;
-            }
-            curl_slist *added = curl_slist_append(headers, extra[i]);
-            if (added == nullptr) {
-                result.error = "Cannot allocate HTTP headers";
-            } else {
-                headers = added;
-            }
-        }
     }
-    if (result.error.empty()) {
+    if (ready) {
         string url = api->base_url;
         while (!url.empty() && url.back() == '/') {
             url.pop_back();
@@ -146,101 +74,78 @@ TextResult curl_post(ApiOptions *api, string request) {
         options[count++] = curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, http_progress);
         options[count++] = curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
         options[count++] = curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
-        int connect_seconds = api->timeout_seconds;
-        if (connect_seconds > 10) {
-            connect_seconds = 10;
-        }
-        options[count++] =
-            curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, (long)connect_seconds * 1000);
+        options[count++] = curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
         options[count++] =
             curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, (long)api->timeout_seconds * 1000);
-        options[count++] =
-            curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)response_limit);
         options[count++] = curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
         options[count++] = curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
         options[count++] = curl_easy_setopt(handle, CURLOPT_NETRC, (long)CURL_NETRC_IGNORED);
-        options[count++] = curl_easy_setopt(handle, CURLOPT_USERAGENT, "agentic-text2sql-cpp/1.0");
+        options[count++] = curl_easy_setopt(handle, CURLOPT_USERAGENT, "text2sql-cpp/1.0");
         options[count++] = curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
         for (int i = 0; i < count; i++) {
             if (options[i] != CURLE_OK) {
-                result.error = "Cannot configure libcurl request";
+                ready = false;
             }
         }
-        if (result.error.empty()) {
+        if (ready) {
             CURLcode code = curl_easy_perform(handle);
-            if (response.too_large) {
-                result.error = "API response exceeds 2 MB limit";
-            } else if (code == CURLE_ABORTED_BY_CALLBACK) {
-                if (cancelled) {
-                    result.error = "API request cancelled";
-                } else {
-                    result.error = string("libcurl transport failed: ") + curl_easy_strerror(code);
-                }
-            } else if (code == CURLE_OPERATION_TIMEDOUT) {
-                result.error = "API request timed out";
-            } else if (code != CURLE_OK) {
-                result.error = string("libcurl transport failed: ") + curl_easy_strerror(code);
+            long status = 0;
+            CURLcode info = curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+            bool success = code == CURLE_OK && info == CURLE_OK;
+            if (status < 200 || status >= 300) {
+                success = false;
             }
-            if (result.error.empty()) {
-                long status = 0;
-                if (curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status) != CURLE_OK) {
-                    result.error = "Cannot read API HTTP status";
-                } else if (status < 200 || status >= 300) {
-                    result.error = "API HTTP error: " + to_string(status);
-                } else {
-                    result.text.assign(response.data, response.used);
-                    result.success = true;
-                }
+            if (success) {
+                result.text.assign(response.data, response.used);
+                result.success = true;
             }
         }
     }
+    // 请求成功或失败都经过这里，统一释放缓冲区、请求头和连接。
     delete[] response.data;
     curl_slist_free_all(headers);
     curl_easy_cleanup(handle);
     curl_global_cleanup();
+    if (result.success == false) {
+        result.error = error_message("API");
+    }
     return result;
 }
 void close_completion(Completion *source) {
     free_json(source->messages);
     source->messages = nullptr;
 }
-Status add_message(Completion *source, string role, string text) {
-    return append_json_message(source->messages, role, text);
-}
 Status start_completion(Completion *source, string system, string input) {
     close_completion(source);
     source->messages = json_array();
-    Status result = add_message(source, "system", system);
+    Status result = append_json_message(source->messages, "system", system);
     if (result.success) {
-        result = add_message(source, "user", input);
+        result = append_json_message(source->messages, "user", input);
     }
     if (result.success == false) {
         close_completion(source);
+        result.error = error_message("API");
     }
     return result;
 }
-// SQL 生成和结果分析共用一次文本请求；不自动重试。
 TextResult request_text(Completion *source) {
+    // 把上下文转成 JSON，发送 API 请求，再取出模型回复文字。
+    TextResult result;
     if (cancelled) {
-        return failed_text("请求已取消");
+        return failed_text("API");
     }
     TextResult request = model_request_json(source);
-    if (request.success == false) {
-        return request;
+    if (request.success && request.text.length() <= 524288) {
+        TextResult response = curl_post(&source->api, request.text);
+        if (response.success) {
+            result = read_model_response(response.text);
+        }
     }
-    if (request.text.length() > 524288) {
-        return failed_text("模型上下文超过大小上限");
+    if (result.text.empty()) {
+        result.success = false;
     }
-    TextResult response = curl_post(&source->api, request.text);
-    if (response.success == false) {
-        return response;
-    }
-    if (json_has_nul_escape(response.text)) {
-        return failed_text("模型回复包含 NUL");
-    }
-    TextResult result = read_model_response(response.text);
-    if (result.success && result.text.empty()) {
-        return failed_text("模型返回了空文本");
+    if (result.success == false) {
+        result.error = error_message("API");
     }
     return result;
 }

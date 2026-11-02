@@ -1,5 +1,6 @@
 // 一次 SQL 生成与执行，成功后可请求一次结果分析。
 const char *invalid_query_marker = "__INVALID_QUERY__";
+// 模型负责判断查询意图，CLI 将固定标记转换成用户能读懂的提示。
 const char *invalid_query_hint =
     "请输入明确的数据库查询问题；查看帮助请输入 /help，退出请输入 /exit。";
 const char *system_prompt =
@@ -29,7 +30,7 @@ TextResult clean_sql_reply(string text) {
         size_t first = result.text.find('\n');
         size_t last = result.text.rfind("```");
         if (first == string::npos || last <= first) {
-            return failed_text("SQL 代码块不完整");
+            return failed_text("API");
         }
         result.text = trim(result.text.substr(first + 1, last - first - 1));
     }
@@ -41,9 +42,11 @@ QueryRun execute_reply(Database *db, string reply) {
     TextResult sql = clean_sql_reply(reply);
     if (sql.success == false) {
         result.error = sql.error;
+        result.api_error = true;
         return result;
     }
     if (sql.text == invalid_query_marker) {
+        // 无效输入到这里就结束，避免执行占位 SQL。
         result.invalid_input = true;
         result.error = invalid_query_hint;
         return result;
@@ -55,6 +58,7 @@ QueryRun execute_reply(Database *db, string reply) {
     return result;
 }
 string result_preview(QueryResult *query, int row_limit) {
+    // 只发送有限预览，并告诉分析模型是否截断，避免把部分数据当作全部。
     string preview;
     bool partial = query->truncated;
     if (query->row_count > row_limit) {
@@ -99,19 +103,21 @@ string result_preview(QueryResult *query, int row_limit) {
 TextResult analyze_result(string question, QueryResult *query, Completion *source, int row_limit) {
     string input = "问题：" + question + "\nSQL：\n" + query->sql + "\n";
     input += result_preview(query, row_limit);
+    // 分析使用独立提示词，不沿用第一次请求的“只返回 SQL”要求。
     Status setup = start_completion(source, analysis_prompt, input);
     if (setup.success == false) {
-        return failed_text(setup.error);
+        return failed_text("API");
     }
     TextResult result = request_text(source);
     close_completion(source);
     return result;
 }
 QueryRun run_query(Database *db, string question, Completion *source, bool with_analysis) {
+    // 主流程：读取结构 -> 请求 SQL -> 执行一次 -> 按需请求结果分析。
     QueryRun result;
     close_completion(source);
     if (trim(question).empty() || question.length() > 16384) {
-        result.error = "问题需为 1–16384 字节";
+        result.error = error_message("输入");
         return result;
     }
     TextResult schema = read_schema(db);

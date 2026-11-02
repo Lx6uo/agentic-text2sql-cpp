@@ -1,5 +1,6 @@
 // SQLite 的调用集中在这个文件。结果用 QueryResult 和动态数组保存。
 void free_query(QueryResult *result) {
+    // 先释放每行的单元格，再释放保存这些行的数组。
     for (int i = 0; i < result->row_count; i++) {
         QueryRow *row = &result->rows[i];
         delete[] row->cells;
@@ -11,6 +12,7 @@ void free_query(QueryResult *result) {
 int database_authorize(void *context, int action, const char *, const char *arg2, const char *,
                        const char *) {
     Database *db = (Database *)context;
+    // 内部读取结构时允许 PRAGMA；模型 SQL 只允许查询和列出的函数。
     if (db->internal) {
         return SQLITE_OK;
     }
@@ -122,25 +124,6 @@ void close_database(Database *db) {
 }
 Status configure_database(Database *db) {
     DatabaseOptions *options = &db->options;
-    bool invalid = false;
-    if (options->timeout_ms < 1) {
-        invalid = true;
-    }
-    if (options->max_display_rows < 1) {
-        invalid = true;
-    }
-    if (options->max_preview_rows < 1) {
-        invalid = true;
-    }
-    if (options->max_sql_bytes < 1) {
-        invalid = true;
-    }
-    if (options->max_result_bytes < 1) {
-        invalid = true;
-    }
-    if (invalid) {
-        return failed_status("Invalid database limits");
-    }
     int dqs = 0;
     if (options->reference_double_quoted_strings) {
         dqs = 1;
@@ -150,7 +133,7 @@ Status configure_database(Database *db) {
     sqlite3_db_config(db->connection, SQLITE_DBCONFIG_DQS_DML, dqs, nullptr);
     if (sqlite3_exec(db->connection, "PRAGMA query_only=ON", nullptr, nullptr, nullptr) !=
         SQLITE_OK) {
-        return failed_status("Cannot configure read-only database");
+        return failed_status("数据库");
     }
     sqlite3_busy_timeout(db->connection, options->timeout_ms);
     sqlite3_limit(db->connection, SQLITE_LIMIT_LENGTH, 1048576);
@@ -172,38 +155,35 @@ void install_database(Database *db, Database *opened) {
     sqlite3_set_authorizer(db->connection, database_authorize, db);
 }
 Status open_database(Database *db, string path, DatabaseOptions options) {
+    bool valid = true;
     if (path.empty()) {
-        return failed_status("Expected an existing SQLite file path");
+        valid = false;
     }
     if (path == ":memory:") {
-        return failed_status("Expected an existing SQLite file path");
+        valid = false;
     }
     if (path.find('\0') != string::npos) {
-        return failed_status("Expected an existing SQLite file path");
+        valid = false;
+    }
+    if (valid == false) {
+        return failed_status("数据库");
     }
     Database opened;
     opened.options = options;
     int code = sqlite3_open_v2(path.c_str(), &opened.connection,
                                SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
-    if (code != SQLITE_OK) {
-        string error = "Cannot allocate database";
-        if (opened.connection != nullptr) {
-            error = sqlite3_errmsg(opened.connection);
+    Status state;
+    if (code == SQLITE_OK) {
+        state = configure_database(&opened);
+        if (state.success) {
+            QueryResult tables = list_tables(&opened);
+            state.success = tables.success;
+            free_query(&tables);
         }
-        close_database(&opened);
-        return failed_status("Cannot open database: " + error);
     }
-    Status result = configure_database(&opened);
-    if (result.success) {
-        QueryResult tables = list_tables(&opened);
-        if (!tables.success) {
-            result = failed_status(tables.error);
-        }
-        free_query(&tables);
-    }
-    if (!result.success) {
+    if (state.success == false) {
         close_database(&opened);
-        return result;
+        return failed_status("数据库");
     }
     install_database(db, &opened);
     return ok_status();
@@ -234,74 +214,62 @@ Cell read_cell(sqlite3_stmt *statement, int column) {
     }
     return result;
 }
+// 各阶段只记录是否成功，函数出口统一报错和清理。
 QueryResult execute_sql(Database *db, string sql, int row_limit) {
     QueryResult result;
     result.sql = sql;
-    double start = now_ms();
     DatabaseOptions *options = &db->options;
-    db->deadline = start + options->timeout_ms;
+    db->deadline = now_ms() + options->timeout_ms;
     db->timed_out = false;
     sqlite3_stmt *statement = nullptr;
     sqlite3_stmt *extra = nullptr;
-    if (db->connection == nullptr) {
-        result.error = "Database is not open";
-    } else if (cancelled) {
-        result.error = "Query cancelled";
-    } else if ((int)sql.length() > options->max_sql_bytes) {
-        result.error = "SQL exceeds length limit";
-    } else if (sql.find('\0') != string::npos) {
-        result.error = "SQL contains NUL";
+    bool ready = db->connection != nullptr && !cancelled;
+    if ((int)sql.length() > options->max_sql_bytes) {
+        ready = false;
     }
-    if (result.error.empty()) {
-        sqlite3_progress_handler(db->connection, 1000, database_progress, db);
-        const char *tail = nullptr;
-        int code = sqlite3_prepare_v3(db->connection, sql.c_str(), (int)sql.length() + 1, 0,
-                                      &statement, &tail);
-        if (code != SQLITE_OK) {
-            result.error = sqlite3_errmsg(db->connection);
-        } else if (statement == nullptr) {
-            result.error = "Empty SQL";
-        } else if (tail != nullptr) {
-            code = sqlite3_prepare_v3(db->connection, tail, -1, 0, &extra, nullptr);
-            if (code != SQLITE_OK || extra != nullptr) {
-                result.error = "Multiple SQL statements are forbidden";
-            }
-        }
-    }
-    if (result.error.empty() && !sqlite3_stmt_readonly(statement)) {
-        result.error = "Only read-only SQL is allowed";
-    }
-    if (result.error.empty()) {
-        result.column_count = sqlite3_column_count(statement);
-        if (result.column_count < 1 || result.column_count > 128) {
-            result.error = "Expected a result-producing query";
-        }
-        for (int c = 0; c < result.column_count; c++) {
-            result.columns[c] = sqlite3_column_name(statement, c);
-        }
+    if (sql.find('\0') != string::npos) {
+        ready = false;
     }
     if (row_limit < 0) {
         row_limit = options->max_display_rows;
     }
-    if (row_limit < 1) {
-        result.error = "Invalid row limit";
+    if (row_limit < 1 || row_limit > 100000) {
+        ready = false;
     }
-    if (result.error.empty()) {
-        // 仅一次分配行索引。单元格按实际读取的行分配，避免预留巨量内存。
-        result.rows = new (nothrow) QueryRow[row_limit];
-        if (result.rows == nullptr) {
-            result.error = "Cannot allocate query results";
+    if (ready) {
+        sqlite3_progress_handler(db->connection, 1000, database_progress, db);
+        const char *tail = nullptr;
+        int code = sqlite3_prepare_v3(db->connection, sql.c_str(), (int)sql.length() + 1, 0,
+                                      &statement, &tail);
+        ready = code == SQLITE_OK && statement != nullptr;
+        if (ready && tail != nullptr) {
+            // 检查剩余文本，防止一次模型回复包含第二条 SQL。
+            code = sqlite3_prepare_v3(db->connection, tail, -1, 0, &extra, nullptr);
+            ready = code == SQLITE_OK && extra == nullptr;
+        }
+        if (ready) {
+            ready = sqlite3_stmt_readonly(statement) != 0;
+            result.column_count = sqlite3_column_count(statement);
+            if (result.column_count < 1 || result.column_count > 128) {
+                ready = false;
+            }
         }
     }
+    if (ready) {
+        for (int c = 0; c < result.column_count; c++) {
+            result.columns[c] = sqlite3_column_name(statement, c);
+        }
+        result.rows = new (nothrow) QueryRow[row_limit];
+        ready = result.rows != nullptr;
+    }
     int bytes = 0;
-    while (result.error.empty()) {
+    // SQLite 每次返回一行，到达行数或大小上限时停止并标记截断。
+    while (ready) {
         if (now_ms() >= db->deadline) {
             db->timed_out = true;
-            result.error = "Query timed out";
             break;
         }
         if (cancelled) {
-            result.error = "Query cancelled";
             break;
         }
         int code = sqlite3_step(statement);
@@ -310,17 +278,15 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
             break;
         }
         if (code != SQLITE_ROW) {
-            result.error = sqlite3_errmsg(db->connection);
             break;
         }
         if (result.row_count == row_limit) {
-            result.truncated = true;
             result.success = true;
+            result.truncated = true;
             break;
         }
         Cell *cells = new (nothrow) Cell[result.column_count];
         if (cells == nullptr) {
-            result.error = "Cannot allocate query row";
             break;
         }
         int row_bytes = 2;
@@ -331,14 +297,10 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
                 row_bytes++;
             }
         }
-        if (!result.error.empty()) {
-            delete[] cells;
-            break;
-        }
         if (bytes + row_bytes > options->max_result_bytes) {
             delete[] cells;
-            result.truncated = true;
             result.success = true;
+            result.truncated = true;
             break;
         }
         QueryRow *row = &result.rows[result.row_count];
@@ -348,14 +310,10 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
     }
     if (now_ms() >= db->deadline) {
         db->timed_out = true;
-        result.error = "Query timed out";
-        result.success = false;
     }
-    if (db->timed_out) {
-        result.error = "Query timed out";
-    }
-    if (cancelled) {
-        result.error = "Query cancelled";
+    result.timed_out = db->timed_out;
+    result.cancelled = cancelled != 0;
+    if (result.timed_out || result.cancelled) {
         result.success = false;
     }
     sqlite3_finalize(extra);
@@ -363,10 +321,9 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
     if (db->connection != nullptr) {
         sqlite3_progress_handler(db->connection, 0, nullptr, nullptr);
     }
-    result.timed_out = db->timed_out;
-    result.cancelled = cancelled != 0;
-    if (!result.success) {
+    if (result.success == false) {
         free_query(&result);
+        result.error = error_message("SQL");
     }
     return result;
 }
@@ -390,7 +347,7 @@ QueryResult internal_query(Database *db, string sql) {
     db->internal = false;
     if (result.truncated) {
         result.success = false;
-        result.error = "Schema exceeds size limit";
+        result.error = error_message("数据库");
         free_query(&result);
     }
     return result;
@@ -401,10 +358,11 @@ QueryResult list_tables(Database *db) {
 }
 
 TextResult read_schema(Database *db) {
+    // 读取表、字段和外键，拼成生成 SQL 时使用的数据库上下文。
     TextResult result;
     QueryResult tables = list_tables(db);
     if (!tables.success) {
-        return failed_text(tables.error);
+        return failed_text("数据库");
     }
     for (int i = 0; i < tables.row_count; i++) {
         QueryRow *row = &tables.rows[i];
@@ -440,7 +398,7 @@ TextResult read_schema(Database *db) {
         }
         free_query(&keys);
         if (result.text.length() > 500000) {
-            result.error = "数据库结构超过大小上限";
+            result.error = error_message("数据库");
         }
         if (!result.error.empty()) {
             break;
@@ -448,5 +406,8 @@ TextResult read_schema(Database *db) {
     }
     free_query(&tables);
     result.success = result.error.empty();
+    if (result.success == false) {
+        result.error = error_message("数据库");
+    }
     return result;
 }

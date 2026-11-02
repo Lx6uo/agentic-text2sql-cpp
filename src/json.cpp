@@ -9,6 +9,7 @@ bool is_utf8_tail(unsigned char value) {
     return true;
 }
 string json_quote(string text) {
+    // 转义引号和控制字符，并替换不完整的 UTF-8，保证请求 JSON 可解析。
     string result = "\"";
     const char *hex = "0123456789abcdef";
     for (int i = 0; i < (int)text.length(); i++) {
@@ -138,7 +139,7 @@ cJSON *json_array() {
 TextResult read_json_string(cJSON *object, const char *name) {
     cJSON *value = json_field(object, name);
     if (cJSON_IsString(value) == false) {
-        return failed_text(string("Expected JSON string: ") + name);
+        return failed_text("JSON");
     }
     TextResult result;
     result.success = true;
@@ -149,11 +150,11 @@ NumberResult read_json_number(cJSON *object, const char *name) {
     NumberResult result;
     cJSON *value = json_field(object, name);
     if (cJSON_IsNumber(value) == false) {
-        result.error = string("Expected JSON number: ") + name;
+        result.error = error_message("JSON");
         return result;
     }
     if (isfinite(value->valuedouble) == false) {
-        result.error = string("Invalid JSON number: ") + name;
+        result.error = error_message("JSON");
         return result;
     }
     result.success = true;
@@ -164,6 +165,7 @@ cJSON *json_string(string value) {
     return cJSON_CreateRaw(json_quote(value).c_str());
 }
 bool json_set(cJSON *object, const char *key, cJSON *value) {
+    // 添加成功后由父对象管理 value；失败时在这里释放。
     if (object == nullptr) {
         free_json(value);
         return false;
@@ -192,13 +194,14 @@ bool json_add(cJSON *array, cJSON *value) {
     return true;
 }
 TextResult json_text(cJSON *value) {
+    // 将 JSON 对象转成普通字符串，同时释放传入对象。
     if (value == nullptr) {
-        return failed_text("Cannot allocate JSON output");
+        return failed_text("JSON");
     }
     char *text = cJSON_PrintUnformatted(value);
     free_json(value);
     if (text == nullptr) {
-        return failed_text("Cannot serialize JSON output");
+        return failed_text("JSON");
     }
     TextResult result;
     result.success = true;
@@ -217,10 +220,10 @@ Status append_json_message(cJSON *messages, string role, string text) {
     }
     if (valid == false) {
         free_json(message);
-        return failed_status("无法创建模型消息");
+        return failed_status("JSON");
     }
     if (json_add(messages, message) == false) {
-        return failed_status("无法创建模型上下文");
+        return failed_status("JSON");
     }
     return ok_status();
 }
@@ -252,43 +255,37 @@ TextResult model_request_json(Completion *source) {
     }
     if (valid == false) {
         free_json(body);
-        return failed_text("无法创建 API 请求");
+        return failed_text("JSON");
     }
     return json_text(body);
 }
 TextResult read_model_response(string text) {
+    // 使用第一条 assistant 回复，基本结构不正确时返回统一错误。
     cJSON *object = json_parse(text);
     cJSON *choices = json_field(object, "choices");
     cJSON *choice = json_item(choices, 0);
     cJSON *message = json_field(choice, "message");
-    TextResult result;
     TextResult role = read_json_string(message, "role");
     TextResult content = read_json_string(message, "content");
-    if (json_is_array(choices) == false) {
-        result.error = "模型未返回文本";
-    } else if (role.success == false) {
-        result.error = "模型未返回文本";
-    } else if (role.text != "assistant") {
-        result.error = "模型未返回文本";
-    } else if (content.success == false) {
-        result.error = "模型未返回文本";
+    bool valid = json_is_array(choices) && role.success;
+    if (role.text != "assistant") {
+        valid = false;
     }
-    if (result.error.empty()) {
-        if (json_has_field(choice, "finish_reason")) {
-            TextResult finish = read_json_string(choice, "finish_reason");
-            if (finish.success == false) {
-                result.error = "模型回复不完整";
-            } else if (finish.text != "stop") {
-                result.error = "模型回复不完整";
-            }
+    if (content.success == false) {
+        valid = false;
+    }
+    if (json_has_field(choice, "finish_reason")) {
+        TextResult finish = read_json_string(choice, "finish_reason");
+        if (finish.success == false || finish.text != "stop") {
+            valid = false;
         }
     }
-    if (result.error.empty()) {
-        result.text = trim(content.text);
-        result.success = true;
-    }
     free_json(object);
-    return result;
+    if (valid == false) {
+        return failed_text("JSON");
+    }
+    content.text = trim(content.text);
+    return content;
 }
 string cell_text(Cell *cell) {
     if (cell->type == SQLITE_NULL) {

@@ -39,7 +39,7 @@ TextResult canonical_path(string path) {
     fs::path native = fs::u8path(path);
     fs::path resolved = fs::canonical(native, error);
     if (error) {
-        return failed_text("Cannot resolve path: " + path);
+        return failed_text("文件");
     }
     TextResult result;
     result.success = true;
@@ -66,18 +66,10 @@ bool path_inside(string path, string root) {
     return true;
 }
 TextResult read_text(string path, int max_bytes) {
-    error_code error;
     fs::path native = fs::u8path(path);
-    uintmax_t bytes = fs::file_size(native, error);
-    if (error) {
-        return failed_text("Cannot read file: " + path);
-    }
-    if (bytes > (uintmax_t)max_bytes) {
-        return failed_text("File exceeds size limit: " + path);
-    }
     ifstream input(native, ios::binary);
     if (input.is_open() == false) {
-        return failed_text("Cannot read file: " + path);
+        return failed_text("文件");
     }
     TextResult result;
     char buffer[4096];
@@ -86,12 +78,12 @@ TextResult read_text(string path, int max_bytes) {
         int count = (int)input.gcount();
         int total = (int)result.text.length() + count;
         if (total > max_bytes) {
-            return failed_text("File exceeds size limit: " + path);
+            return failed_text("文件");
         }
         result.text.append(buffer, count);
     }
     if (input.eof() == false) {
-        return failed_text("File read failed: " + path);
+        return failed_text("文件");
     }
     result.success = true;
     return result;
@@ -104,19 +96,19 @@ Status open_output(OutputFile *output, string path) {
         fs::path parent = fs::u8path(folder);
         fs::create_directories(parent, error);
         if (error) {
-            return failed_status("Cannot create output directory");
+            return failed_status("文件");
         }
     }
     bool exists = fs::exists(native, error);
     if (error) {
-        return failed_status("Cannot inspect output path");
+        return failed_status("文件");
     }
     if (exists) {
-        return failed_status("Cannot create output (existing files are preserved): " + path);
+        return failed_status("文件");
     }
     output->stream.open(native, ios::binary);
     if (output->stream.is_open() == false) {
-        return failed_status("Cannot create output: " + path);
+        return failed_status("文件");
     }
     return ok_status();
 }
@@ -124,22 +116,23 @@ Status write_output(OutputFile *output, string text) {
     output->stream.write(text.data(), (streamsize)text.length());
     output->stream.flush();
     if (output->stream.fail()) {
-        return failed_status("Benchmark output write failed");
+        return failed_status("文件");
     }
     return ok_status();
 }
 TextResult dataset_database(string root, string id) {
+    // 数据库名称只能是简单名称，解析后的路径也必须留在数据集目录内。
     if (id.empty()) {
-        return failed_text("Unsafe Spider db_id");
+        return failed_text("文件");
     }
     if (id.length() > 128) {
-        return failed_text("Unsafe Spider db_id");
+        return failed_text("文件");
     }
     if (id == ".") {
-        return failed_text("Unsafe Spider db_id");
+        return failed_text("文件");
     }
     if (id == "..") {
-        return failed_text("Unsafe Spider db_id");
+        return failed_text("文件");
     }
     for (int i = 0; i < (int)id.length(); i++) {
         unsigned char c = id[i];
@@ -152,72 +145,51 @@ TextResult dataset_database(string root, string id) {
         if (c == '-') {
             continue;
         }
-        return failed_text("Unsafe Spider db_id");
+        return failed_text("文件");
     }
     string directory = join_path(root, "database");
     directory = join_path(directory, id);
     string path = join_path(directory, id + ".sqlite");
     TextResult resolved = canonical_path(path);
     if (resolved.success == false) {
-        return failed_text("Spider database not found: " + id);
+        return failed_text("文件");
     }
     if (path_inside(resolved.text, root) == false) {
-        return failed_text("Spider database escapes dataset directory");
+        return failed_text("文件");
     }
     return resolved;
 }
 DatasetResult load_dataset(BenchmarkOptions *options) {
+    // 只读取本次评测需要的题目，items 使用完后由调用者 delete[]。
     DatasetResult result;
+    result.error = error_message("数据集");
     result.split = options->split;
     if (result.split == "train") {
         result.split = "train_spider";
     }
+    string splits[] = {"dev", "train_spider", "train_others", "test"};
     bool supported = false;
-    if (result.split == "dev") {
-        supported = true;
-    }
-    if (result.split == "train_spider") {
-        supported = true;
-    }
-    if (result.split == "train_others") {
-        supported = true;
-    }
-    if (result.split == "test") {
-        supported = true;
+    for (int i = 0; i < 4; i++) {
+        if (result.split == splits[i]) {
+            supported = true;
+        }
     }
     if (supported == false) {
-        result.error = "Unsupported split: use dev, train_spider, train_others or test";
         return result;
     }
     TextResult root = canonical_path(options->dataset);
     if (root.success == false) {
-        result.error = root.error;
         return result;
     }
     result.root = root.text;
-    string file = join_path(result.root, result.split + ".json");
-    TextResult path = canonical_path(file);
-    if (path.success == false) {
-        result.error = "Spider questions not found";
-        return result;
-    }
-    if (path_inside(path.text, result.root) == false) {
-        result.error = "Spider question file escapes dataset directory";
+    TextResult path = canonical_path(join_path(result.root, result.split + ".json"));
+    if (path.success == false || path_inside(path.text, result.root) == false) {
         return result;
     }
     TextResult text = read_text(path.text, 64 * 1024 * 1024);
-    if (text.success == false) {
-        result.error = text.error;
-        return result;
-    }
-    if (json_has_nul_escape(text.text)) {
-        result.error = "Dataset JSON contains NUL";
-        return result;
-    }
     cJSON *array = json_parse(text.text);
-    if (json_is_array(array) == false) {
+    if (text.success == false || json_is_array(array) == false) {
         free_json(array);
-        result.error = "Spider split must be a valid JSON array";
         return result;
     }
     int count = json_size(array);
@@ -226,36 +198,22 @@ DatasetResult load_dataset(BenchmarkOptions *options) {
     }
     if (count < 1) {
         free_json(array);
-        result.error = "Empty Spider split";
         return result;
     }
     result.items = new (nothrow) DatasetItem[count];
     if (result.items == nullptr) {
         free_json(array);
-        result.error = "Cannot allocate dataset";
         return result;
     }
     result.count = count;
     cJSON *item = json_first_item(array);
+    bool valid = true;
     for (int i = 0; i < count; i++) {
         TextResult id = read_json_string(item, "db_id");
         TextResult question = read_json_string(item, "question");
         TextResult query = read_json_string(item, "query");
-        bool valid = true;
-        if (json_is_object(item) == false) {
-            valid = false;
-        }
-        if (id.success == false) {
-            valid = false;
-        }
-        if (question.success == false) {
-            valid = false;
-        }
-        if (query.success == false) {
-            valid = false;
-        }
+        valid = id.success && question.success && query.success;
         if (valid == false) {
-            result.error = "Spider item missing db_id, question or query at index " + to_string(i);
             break;
         }
         DatasetItem *destination = &result.items[i];
@@ -265,12 +223,13 @@ DatasetResult load_dataset(BenchmarkOptions *options) {
         item = json_next_item(item);
     }
     free_json(array);
-    if (result.error.empty() == false) {
+    if (valid == false) {
         delete[] result.items;
         result.items = nullptr;
         result.count = 0;
         return result;
     }
     result.success = true;
+    result.error.clear();
     return result;
 }

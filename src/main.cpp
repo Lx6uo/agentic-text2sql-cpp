@@ -1,4 +1,5 @@
 // 主流程：读取 JSON 配置，直接进入自然语言查询。
+// 各 CPP 按依赖顺序包含，CMake 只编译本文件，避免重复定义。
 #include "common.cpp"
 #include "json.cpp"
 #include "files.cpp"
@@ -66,18 +67,17 @@ int application_main(int argc, char **argv) {
 }
 #ifdef _WIN32
 TextResult to_utf8(const wchar_t *value) {
+    // Windows 命令行使用 UTF-16，转换后才能统一处理中文参数和路径。
     TextResult result;
     int size =
         WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, nullptr, 0, nullptr, nullptr);
     if (size <= 0) {
-        result.error = "Cannot decode Windows command line as UTF-8";
-        return result;
+        return failed_text("参数");
     }
     result.text.resize(size);
     if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value, -1, result.text.data(), size,
                             nullptr, nullptr) <= 0) {
-        result.error = "Cannot decode Windows command line as UTF-8";
-        return result;
+        return failed_text("参数");
     }
     result.text.pop_back();
     result.success = true;

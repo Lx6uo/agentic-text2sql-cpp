@@ -9,23 +9,21 @@ void print_help() {
 }
 Args parse_arguments(int argc, char **argv) {
     Args args;
+    args.error = error_message("参数");
     for (int i = 1; i < argc; i++) {
         string value = argv[i];
         if (value == "--help" || value == "-h") {
             args.help = true;
         } else if (value == "benchmark") {
             if (args.benchmark) {
-                args.error = "重复参数：benchmark";
                 return args;
             }
             args.benchmark = true;
         } else if (value == "--db") {
             if (args.db_given) {
-                args.error = "重复参数：--db";
                 return args;
             }
             if (i + 1 == argc) {
-                args.error = "--db 缺少数据库路径";
                 return args;
             }
             i++;
@@ -33,26 +31,23 @@ Args parse_arguments(int argc, char **argv) {
             args.db_given = true;
         } else if (value == "--config") {
             if (args.config_required) {
-                args.error = "重复参数：--config";
                 return args;
             }
             if (i + 1 == argc) {
-                args.error = "--config 缺少配置路径";
                 return args;
             }
             i++;
             args.config = argv[i];
             args.config_required = true;
         } else {
-            args.error = "未知参数：" + value;
             return args;
         }
     }
     if (args.db_given && args.benchmark) {
-        args.error = "--db 只用于自然语言查询，不用于 benchmark";
         return args;
     }
     args.success = true;
+    args.error.clear();
     return args;
 }
 bool parse_positive_int(string text, int *number, int maximum) {
@@ -154,6 +149,7 @@ void print_analysis_text(string text) {
     cout << '\n';
 }
 void print_result(QueryRun *result) {
+    // 分开显示 SQL、执行结果和分析；分析失败不会遮住已经查询到的数据。
     if (result->invalid_input) {
         cout << invalid_query_hint << '\n';
         return;
@@ -211,7 +207,7 @@ int run_benchmark_prompt(Config *config) {
     string count = ask_text("评测题数 [20]：");
     if (count.empty() == false) {
         if (parse_positive_int(count, &options.limit, 100000) == false) {
-            print_error("题数需为 1–100000");
+            print_error(error_message("参数"));
             return 2;
         }
     }
@@ -243,6 +239,7 @@ void print_guide(string table) {
     cout << "输入 /help 查看引导，/exit 退出。\n\n";
 }
 int run_chat(Config *config, string path) {
+    // 整个会话共用一个数据库连接，每次提问重新建立模型上下文。
     ApiOptions *api = &config->api;
     cout << "SQLite 自然语言查询\n";
     if (path.empty()) {

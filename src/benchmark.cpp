@@ -9,6 +9,7 @@ long double cell_number(Cell *cell) {
     return cell->real;
 }
 bool cell_equal(Cell *a, Cell *b) {
+    // 整数和浮点数可以互相比较，允许少量浮点计算误差。
     if (numeric_cell(a) && numeric_cell(b)) {
         long double x = cell_number(a);
         long double y = cell_number(b);
@@ -81,6 +82,7 @@ void sort_row_indices(QueryResult *result, int *indices) {
     sorting_query = nullptr;
 }
 bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered) {
+    // 按列位置比较；有外层 ORDER BY 时保留行顺序，否则先排序行号。
     if (prediction->success == false) {
         return false;
     }
@@ -264,7 +266,7 @@ string csv_field(string text) {
 BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
     BenchmarkResult result;
     if (options->limit < 1 || options->limit > 100000) {
-        result.error = "评测题数需为 1–100000";
+        result.error = error_message("数据集");
         return result;
     }
     DatasetResult dataset = load_dataset(options);
@@ -310,7 +312,7 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
         if (path.success) {
             opened = open_database(&db, path.text, limits);
         } else {
-            opened = failed_status(path.error);
+            opened = failed_status("数据集");
         }
         if (opened.success) {
             Completion source;
@@ -325,12 +327,11 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
                 limits.reference_double_quoted_strings = true;
                 opened = open_database(&reference, path.text, limits);
                 if (opened.success) {
+                    // 标准 SQL 只在本地执行用于比较，不放进模型提示词。
                     gold = execute_sql(&reference, item->query);
                     QueryResult *query = &run.query;
-                    if (gold.success == false) {
-                        error = "标准 SQL 失败：" + gold.error;
-                    } else if (gold.truncated || query->truncated) {
-                        error = "结果超过评测上限，不参与比较";
+                    if (gold.success == false || gold.truncated || query->truncated) {
+                        error = error_message("数据集");
                     } else {
                         match = "0";
                         if (equivalent_results(query, &gold, has_outer_order_by(item->query))) {
@@ -367,10 +368,10 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
     }
     delete[] dataset.items;
     if (incomplete && result.error.empty()) {
-        result.error = "部分结果无法评测，请查看 CSV 的错误列";
+        result.error = error_message("数据集");
     }
     if (cancelled) {
-        result.error = "评测已取消，CSV 保留已完成的记录";
+        result.error = error_message("数据集");
     }
     result.success = result.error.empty();
     return result;

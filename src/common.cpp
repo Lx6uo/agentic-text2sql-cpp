@@ -87,6 +87,7 @@ struct ConfigResult {
 };
 struct Completion {
     ApiOptions api;
+    // messages 保存本次请求上下文，用完后由 close_completion 释放。
     cJSON *messages = nullptr;
 };
 struct QueryRun {
@@ -94,6 +95,7 @@ struct QueryRun {
     bool api_error = false;
     string error;
     bool invalid_input = false;
+    // 查询和分析分别记录状态，分析失败时仍可显示查询结果。
     TextResult analysis;
     QueryResult query;
 };
@@ -145,14 +147,42 @@ Status ok_status() {
     result.success = true;
     return result;
 }
-Status failed_status(string error) {
+// 所有模块在出口使用这些统一错误信息，由 CLI 显示。
+string error_message(string operation) {
+    if (cancelled) {
+        return "操作已取消。";
+    }
+    if (operation == "API") {
+        return "模型请求失败，请检查 API 配置或网络。";
+    }
+    if (operation == "配置") {
+        return "配置读取失败，请检查文件路径和 JSON 字段。";
+    }
+    if (operation == "参数") {
+        return "参数有误，请检查启动选项或输入值。";
+    }
+    if (operation == "文件") {
+        return "文件操作失败，请检查路径和文件是否可读写。";
+    }
+    if (operation == "数据库") {
+        return "数据库打开或读取失败，请检查 SQLite 文件。";
+    }
+    if (operation == "SQL") {
+        return "SQL 执行失败，请检查查询语句。";
+    }
+    if (operation == "数据集") {
+        return "数据集读取或评测失败，请检查数据和输出路径。";
+    }
+    return "数据处理失败，请检查输入。";
+}
+Status failed_status(string operation) {
     Status result;
-    result.error = error;
+    result.error = error_message(operation);
     return result;
 }
-TextResult failed_text(string error) {
+TextResult failed_text(string operation) {
     TextResult result;
-    result.error = error;
+    result.error = error_message(operation);
     return result;
 }
 bool is_blank(char value) {

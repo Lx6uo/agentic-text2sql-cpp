@@ -110,6 +110,8 @@ SQLite 自然语言查询
 
 成功的查询通常有两次 API 请求：第一次生成 SQL，第二次分析有限结果。SQL 执行失败直接报错；分析失败仍显示已有 SQL 和结果，并提示分析暂不可用。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
 
+错误提示集中在 `src/common.cpp`，各模块只判断操作是否成功，在出口清理资源并返回统一提示，最后由 CLI 显示。API 不再通过 `validate_api` 逐项预校验 URL、模型名等字段，请求失败统一提示检查配置或网络。JSON 配置保留基本类型和数值范围检查；SQLite 只读限制、超时和资源释放仍保留。
+
 ## Benchmark 和 CSV
 
 完整 Spider 运行数据已包含在 `data/spider.zip`，来源为 [Spider 官方数据](https://yale-lily.github.io/spider)。CMake 配置时自动解压到 `build/data/spider`，其中包含 206 个不重复 SQLite 库、表元信息和标准 SQL。原下载包中的重复数据库合并，题目和数据库内容保留原始字节；上游 README 和引用说明保存在压缩包内。
