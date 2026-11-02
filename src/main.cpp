@@ -14,14 +14,21 @@ void cancel_request(int) {
     cancelled = 1;
 }
 string find_bundled_data(string executable) {
-    fs::path folder = fs::u8path(executable).parent_path();
-    fs::path locations[] = {folder / "data", folder.parent_path() / "data",
-                            folder.parent_path() / "share" / "text2sql" / "data",
-                            fs::u8path(TEXT2SQL_DATA_DIR), fs::u8path("data")};
+    string folder = parent_path(executable);
+    string parent = parent_path(folder);
+    string locations[5];
+    locations[0] = join_path(folder, "data");
+    locations[1] = join_path(parent, "data");
+    locations[2] = join_path(parent, "share/text2sql/data");
+    locations[3] = TEXT2SQL_DATA_DIR;
+    locations[4] = "data";
     for (int i = 0; i < 5; i++) {
-        if (file_exists((locations[i] / "company.sqlite").u8string())) {
-            TextResult path = canonical_path(locations[i].u8string());
-            if (path.success) return path.text;
+        string sample = join_path(locations[i], "company.sqlite");
+        if (file_exists(sample)) {
+            TextResult path = canonical_path(locations[i]);
+            if (path.success) {
+                return path.text;
+            }
         }
     }
     return "";
@@ -43,18 +50,29 @@ int application_main(int argc, char **argv) {
         print_error(loaded.error);
         return 2;
     }
-    loaded.config.bundled_data = find_bundled_data(argv[0]);
-    if (args.benchmark) return run_benchmark_prompt(&loaded.config);
-    if (!args.demo) {
-        string path = loaded.config.database_path;
-        if (args.db_given) path = args.db;
-        else if (path.empty() && !loaded.config.bundled_data.empty())
-            path = loaded.config.bundled_data + "/company.sqlite";
-        return run_chat(&loaded.config, path);
+    Config *config = &loaded.config;
+    config->bundled_data = find_bundled_data(argv[0]);
+    if (args.benchmark) {
+        return run_benchmark_prompt(config);
     }
-    bool success = run_demo(&loaded.config);
-    if (cancelled) return 130;
-    if (success) return 0;
+    if (!args.demo) {
+        string path = config->database_path;
+        if (args.db_given) {
+            path = args.db;
+        } else if (path.empty()) {
+            if (config->bundled_data.empty() == false) {
+                path = join_path(config->bundled_data, "company.sqlite");
+            }
+        }
+        return run_chat(config, path);
+    }
+    bool success = run_demo(config);
+    if (cancelled) {
+        return 130;
+    }
+    if (success) {
+        return 0;
+    }
     return 1;
 }
 #ifdef _WIN32
@@ -81,7 +99,9 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     int argc = 0;
     LPWSTR *wide = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (wide == nullptr) return 2;
+    if (wide == nullptr) {
+        return 2;
+    }
     string *values = new (nothrow) string[argc];
     char **argv = new (nothrow) char *[argc];
     bool valid = values != nullptr && argv != nullptr;
@@ -97,7 +117,9 @@ int main() {
     }
     LocalFree(wide);
     int status = 2;
-    if (valid) status = application_main(argc, argv);
+    if (valid) {
+        status = application_main(argc, argv);
+    }
     delete[] argv;
     delete[] values;
     return status;
