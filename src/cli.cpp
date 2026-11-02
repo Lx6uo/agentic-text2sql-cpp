@@ -140,11 +140,30 @@ void print_table(QueryResult *result) {
     }
     cout << '\n';
 }
-void print_result(QueryRun *result) {
-    QueryResult *query = &result->query;
-    if (query->sql.empty() == false) {
-        cout << "\nSQL 语句\n--------------------------------\n" << query->sql << '\n';
+void print_analysis_text(string text) {
+    for (int i = 0; i < (int)text.length(); i++) {
+        unsigned char c = text[i];
+        if (c == '\n' || c == '\t') {
+            cout << text[i];
+        } else if (c < 32 || c == 127) {
+            cout << ' ';
+        } else {
+            cout << text[i];
+        }
     }
+    cout << '\n';
+}
+void print_result(QueryRun *result) {
+    if (result->invalid_input) {
+        cout << invalid_query_hint << '\n';
+        return;
+    }
+    QueryResult *query = &result->query;
+    if (query->sql.empty()) {
+        print_error(result->error);
+        return;
+    }
+    cout << "\nSQL 语句\n--------------------------------\n" << query->sql << '\n';
     cout << "\n查询结果\n--------------------------------\n";
     if (result->success) {
         print_table(query);
@@ -153,6 +172,16 @@ void print_result(QueryRun *result) {
         print_error(result->error);
     }
     cout << "--------------------------------\n";
+    if (result->success) {
+        TextResult *analysis = &result->analysis;
+        cout << "\n分析结果\n--------------------------------\n";
+        if (analysis->success) {
+            print_analysis_text(analysis->text);
+        } else {
+            cout << "分析暂不可用：" << analysis->error << '\n';
+        }
+        cout << "--------------------------------\n";
+    }
 }
 void print_stats(string name, BenchmarkStats *stats) {
     double executed = 0;
@@ -194,8 +223,7 @@ int run_benchmark_prompt(Config *config) {
     if (!result.success) {
         print_error(result.error);
     }
-    print_stats("Baseline（一次执行）", &result.baseline);
-    print_stats("纠错模式", &result.corrected);
+    print_stats("单次 SQL 评测", &result.stats);
     if (!result.output.empty()) {
         cout << "CSV：" << result.output << '\n';
     }
@@ -260,17 +288,17 @@ int run_chat(Config *config, string path) {
             continue;
         }
         if (question[0] == '/') {
-            print_error("未知命令，仅支持 /help 和 /exit");
+            cout << invalid_query_hint << '\n';
             continue;
         }
         if (api->api_key.empty()) {
             print_error("请先配置 AI 密钥");
             continue;
         }
-        cout << "正在查询…\n";
+        cout << "正在处理…\n";
         Completion source;
         source.api = config->api;
-        QueryRun result = run_query(&db, question, &source, query_limit(&config->agent));
+        QueryRun result = run_query(&db, question, &source, true);
         print_result(&result);
         free_query(&result.query);
         cout << '\n';

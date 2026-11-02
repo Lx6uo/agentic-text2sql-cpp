@@ -1,6 +1,6 @@
-# SQLite 自然语言查询：课程精简版
+# SQLite 自然语言查询与结果分析
 
-使用真实 AI 把自然语言转换成只读 SQLite SQL。程序固定读取表结构、生成 SQL、执行查询；失败后把 SQL 错误交给 AI 修正，总共最多执行三次。启动后直接接收自然语言问题。支持 JSON 配置、Windows/macOS/Linux，以及 Baseline/纠错模式的 CSV 对照评测。
+使用真实 AI 把自然语言转换成只读 SQLite SQL。程序读取真实结构、生成并执行一次 SQL，成功后再请求模型分析结果，CLI 分别显示 SQL、查询结果和分析文字。评测通过独立命令手动运行，启动时不会自动评测。支持 JSON 配置、Windows/macOS/Linux 和 CSV 评测。
 
 代码使用普通函数、结构体、数组、判断、循环和适量简单指针。变量和控制语句逐步展开，行索引数组一次分配，JSON 与路径细节集中在辅助模块。各功能保留独立 CPP，没有自写头文件或测试目录。
 
@@ -45,7 +45,7 @@ Windows 保留原生 UTF-16 参数转 UTF-8、UTF-8 控制台、中文路径、M
 cp config.example.json config.json
 ```
 
-`config.json` 支持 `api`、`agent`、`database` 三个部分；可以省略字段并使用默认值。
+`config.json` 支持 `api`、`database` 两个部分；可以省略字段并使用默认值。
 
 ```json
 {
@@ -56,11 +56,11 @@ cp config.example.json config.json
     "timeout_seconds": 45,
     "max_tokens": 2048
   },
-  "agent": { "max_sql_attempts": 3 },
   "database": {
     "path": "data/company.sqlite",
     "timeout_ms": 5000,
     "max_display_rows": 100,
+    "max_preview_rows": 10,
     "max_sql_bytes": 16384,
     "max_result_bytes": 1048576
   }
@@ -82,7 +82,7 @@ export DEEPSEEK_API_KEY
 
 指定文件不存在或配置非法时会报错。配置和环境文件已被 `.gitignore` 排除；错误信息不会输出配置内容或密钥。
 
-`max_sql_attempts` 可降低执行次数，程序始终限制为最多三次。旧配置中的 `max_steps`、`max_repairs` 仍会保留更低的次数限制；`max_preview_rows` 兼容读取，但当前流程不上传查询行预览。Baseline 始终最多执行一次。
+每个问题只生成并执行一次 SQL，不自动纠错。旧配置里的 `agent` 字段不再使用，可以删除。`database.max_preview_rows` 控制发送给分析模型的结果预览行数，默认 10；长值和过大的预览会截断并标记。
 
 ## 直接输入自然语言
 
@@ -106,7 +106,9 @@ SQLite 自然语言查询
 
 配置中的相对数据库路径以配置文件所在目录为基准。没有提供路径时，默认连接随程序构建的样例数据库，随后持续接收自然语言问题。已连接的数据库在整个会话中保留，每个问题重新建立 AI 上下文；查询结果或错误显示后继续提示 `你：`。
 
-输入 `/help` 查看引导，`/exit` 退出。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
+输入 `/help` 查看引导，`/exit` 退出。单独输入 `help`、`exit`、问候或无查询意图内容，会由模型按系统提示词返回内部固定标记，Agent 捕获后显示统一提示，不执行模型 SQL，也不请求结果分析。含有 help/exit 的有效查询，例如“查询姓名包含 help 的员工”，仍可正常查询。
+
+成功的查询通常有两次 API 请求：第一次生成 SQL，第二次分析有限结果。SQL 执行失败直接报错；分析失败仍显示已有 SQL 和结果，并提示分析暂不可用。启动连接或配置失败会报告错误；单个问题失败后可以继续提问。EOF 正常退出，Ctrl+C 取消请求或 SQL 并返回 130。
 
 ## Benchmark 和 CSV
 
@@ -142,14 +144,10 @@ SQLite 自然语言查询
 
 支持 dev、train_spider、train_others 和 test；train 是 train_spider 的别名。
 
-每题串行比较两种方式：
+评测只有一种生成方式：每题生成并执行一次 SQL，然后与标准 SQL 的结果比较。评测不调用分析模型，因此每题通常只有一次 API 请求。
+CSV 为 UTF-8，字段为 `question,db_id,sql,executed,matched,error`。成功标记为 1，失败为 0；标准 SQL 失败、评测结果截断或无法比较时，`matched` 留空并记录错误。文本字段正确引用逗号、双引号和换行，已存在的输出文件不会覆盖。
 
-- `baseline`：AI 生成并执行一次 SQL。
-- `corrected`：相同问题与结构，失败后修正，总共最多三次执行。
-
-CSV 为 UTF-8，字段为 `question,db_id,mode,sql,executed,matched,error`。成功标记为 1，失败为 0；标准 SQL 失败、评测结果截断或无法比较时，`matched` 留空并记录错误。文本字段正确引用逗号、双引号和换行，已存在的输出文件不会覆盖。
-
-终端汇总每种模式的题数、执行成功率和结果一致率。分母是该模式实际尝试的题数。API 或输出错误会停止评测，并保留已写入的 CSV；请检查实际行数。
+终端汇总实际题数、执行成功率和结果一致率，分母是实际尝试的题数。API 或输出错误会停止评测，并保留已写入的 CSV；请检查实际行数。
 
 结果按列位置比较。标准 SQL 有外层 ORDER BY 时保留顺序，否则排序行号后比较并保留重复行。数值使用相对容差 1e-9，截断结果不判一致。评测最多读取 100000 行/16 MB。标准 SQL 只用于本地比较，不发送给模型。
 
@@ -159,13 +157,13 @@ CSV 为 UTF-8，字段为 `question,db_id,mode,sql,executed,matched,error`。成
 
 SQLite 文件只读打开；保留 authorizer、query_only、defensive、trusted_schema=OFF、多语句拒绝、函数白名单、查询超时和结果大小上限。合法 JOIN、CTE、聚合和窗口函数可以使用。HTTPS 请求在进程内由 libcurl 发送，校验证书、不跟随重定向，限制时间与解压后的响应大小，密钥不进入日志或命令行。
 
-模型接收问题、表结构和 SQL 执行错误，系统提示词使用中文。程序不上传数据库文件或查询结果行，不支持写数据库。API Key 是使用者的本地配置，不随仓库提供。自然语言查询和 Benchmark 都需要有效 API Key。
+生成 SQL 的模型接收问题和真实表结构；分析模型接收问题、已执行 SQL 和有限结果预览，使用独立中文提示词。程序不上传数据库文件，不支持写数据库。API Key 是使用者的本地配置，不随仓库提供。自然语言查询和 Benchmark 都需要有效 API Key。
 
 ```text
 src/
 ├── main.cpp                 # 启动和 Windows 参数适配
 ├── common.cpp, config.cpp   # 结构体、JSON 配置
-├── database.cpp, agent.cpp  # SQLite、固定纠错
+├── database.cpp, agent.cpp  # SQLite、查询与分析
 ├── llm.cpp, json.cpp        # HTTPS、JSON 协议
 ├── benchmark.cpp, files.cpp # CSV 评测、文件读取
 └── cli.cpp                  # 查询输入和结果显示

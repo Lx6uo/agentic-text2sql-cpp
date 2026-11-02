@@ -219,11 +219,12 @@ Status start_completion(Completion *source, string system, string input) {
     }
     return result;
 }
-TextResult request_sql(Completion *source) {
+// SQL 生成和结果分析共用一次文本请求；不自动重试。
+TextResult request_text(Completion *source) {
     if (cancelled) {
-        return failed_text("查询已取消");
+        return failed_text("请求已取消");
     }
-    TextResult request = sql_request_json(source);
+    TextResult request = model_request_json(source);
     if (request.success == false) {
         return request;
     }
@@ -237,27 +238,9 @@ TextResult request_sql(Completion *source) {
     if (json_has_nul_escape(response.text)) {
         return failed_text("模型回复包含 NUL");
     }
-    TextResult result = read_sql_response(response.text);
-    if (result.success == false) {
-        return result;
-    }
-    if (result.text.compare(0, 3, "```") == 0) {
-        size_t first = result.text.find('\n');
-        size_t last = result.text.rfind("```");
-        if (first == string::npos) {
-            return failed_text("SQL 代码块不完整");
-        }
-        if (last <= first) {
-            return failed_text("SQL 代码块不完整");
-        }
-        result.text = trim(result.text.substr(first + 1, last - first - 1));
-    }
-    if (result.text.empty()) {
-        return failed_text("模型返回了空 SQL");
-    }
-    Status added = add_message(source, "assistant", result.text);
-    if (added.success == false) {
-        return failed_text(added.error);
+    TextResult result = read_model_response(response.text);
+    if (result.success && result.text.empty()) {
+        return failed_text("模型返回了空文本");
     }
     return result;
 }

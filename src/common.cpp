@@ -35,7 +35,7 @@ struct DatabaseOptions {
     int max_display_rows = 100;
     int max_sql_bytes = 16384;
     int max_result_bytes = 1048576;
-    int max_preview_rows = 10; // 兼容旧配置，固定流程不上传查询行预览。
+    int max_preview_rows = 10;
     bool reference_double_quoted_strings = false;
 };
 struct Database {
@@ -74,14 +74,8 @@ struct ApiOptions {
     int timeout_seconds = 45;
     int max_tokens = 2048;
 };
-struct AgentOptions {
-    int max_sql_attempts = 3;
-    int max_steps = 3;
-    int max_repairs = 2; // 兼容旧配置中的更低上限。
-};
 struct Config {
     ApiOptions api;
-    AgentOptions agent;
     DatabaseOptions database;
     string database_path;
     string bundled_data;
@@ -99,7 +93,8 @@ struct QueryRun {
     bool success = false;
     bool api_error = false;
     string error;
-    int attempts = 0;
+    bool invalid_input = false;
+    TextResult analysis;
     QueryResult query;
 };
 struct BenchmarkOptions {
@@ -117,8 +112,7 @@ struct BenchmarkResult {
     bool success = false;
     string error;
     string output;
-    BenchmarkStats baseline;
-    BenchmarkStats corrected;
+    BenchmarkStats stats;
 };
 struct DatasetItem {
     string db_id;

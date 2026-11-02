@@ -59,44 +59,26 @@ bool less_row(QueryResult *result, int a, int b) {
     }
     return false;
 }
-// 只排序行号，不复制字符串。归并排序保持 O(n log n)。
-void sort_row_indices(QueryResult *result, int *indices, int *work) {
-    int count = result->row_count;
-    for (int i = 0; i < count; i++) {
+// 单线程评测只排序行号，借用当前结果指针，不复制单元格。
+QueryResult *sorting_query = nullptr;
+int compare_row_indices(const void *a, const void *b) {
+    int left = *(const int *)a;
+    int right = *(const int *)b;
+    if (less_row(sorting_query, left, right)) {
+        return -1;
+    }
+    if (less_row(sorting_query, right, left)) {
+        return 1;
+    }
+    return 0;
+}
+void sort_row_indices(QueryResult *result, int *indices) {
+    for (int i = 0; i < result->row_count; i++) {
         indices[i] = i;
     }
-    for (int width = 1; width < count; width *= 2) {
-        for (int start = 0; start < count; start += width * 2) {
-            int middle = start + width;
-            int end = start + width * 2;
-            if (middle > count) {
-                middle = count;
-            }
-            if (end > count) {
-                end = count;
-            }
-            int left = start;
-            int right = middle;
-            for (int target = start; target < end; target++) {
-                if (left == middle) {
-                    work[target] = indices[right];
-                    right++;
-                } else if (right == end) {
-                    work[target] = indices[left];
-                    left++;
-                } else if (less_row(result, indices[right], indices[left])) {
-                    work[target] = indices[right];
-                    right++;
-                } else {
-                    work[target] = indices[left];
-                    left++;
-                }
-            }
-        }
-        for (int i = 0; i < count; i++) {
-            indices[i] = work[i];
-        }
-    }
+    sorting_query = result;
+    qsort(indices, result->row_count, sizeof(int), compare_row_indices);
+    sorting_query = nullptr;
 }
 bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered) {
     if (prediction->success == false) {
@@ -123,7 +105,6 @@ bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered
     }
     int *left = new (nothrow) int[count];
     int *right = new (nothrow) int[count];
-    int *work = new (nothrow) int[count];
     bool allocation_failed = false;
     if (left == nullptr) {
         allocation_failed = true;
@@ -131,13 +112,9 @@ bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered
     if (right == nullptr) {
         allocation_failed = true;
     }
-    if (work == nullptr) {
-        allocation_failed = true;
-    }
     if (allocation_failed) {
         delete[] left;
         delete[] right;
-        delete[] work;
         return false;
     }
     if (ordered) {
@@ -146,8 +123,8 @@ bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered
             right[i] = i;
         }
     } else {
-        sort_row_indices(prediction, left, work);
-        sort_row_indices(gold, right, work);
+        sort_row_indices(prediction, left);
+        sort_row_indices(gold, right);
     }
     bool equal = true;
     for (int r = 0; r < count; r++) {
@@ -167,7 +144,6 @@ bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered
     }
     delete[] left;
     delete[] right;
-    delete[] work;
     return equal;
 }
 struct OrderState {
@@ -284,21 +260,15 @@ string csv_field(string text) {
     }
     return result + '"';
 }
+// 手动评测只有一种生成方式，每题不请求分析，保留标准 SQL 结果比较。
 BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
     BenchmarkResult result;
-    bool invalid_limit = false;
-    if (options->limit < 1) {
-        invalid_limit = true;
-    }
-    if (options->limit > 100000) {
-        invalid_limit = true;
-    }
-    if (invalid_limit) {
+    if (options->limit < 1 || options->limit > 100000) {
         result.error = "评测题数需为 1–100000";
         return result;
     }
     DatasetResult dataset = load_dataset(options);
-    if (!dataset.success) {
+    if (dataset.success == false) {
         result.error = dataset.error;
         return result;
     }
@@ -310,125 +280,90 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
     OutputFile output;
     Status state = open_output(&output, result.output);
     if (state.success) {
-        state = write_output(&output, "question,db_id,mode,sql,executed,matched,error\n");
+        state = write_output(&output, "question,db_id,sql,executed,matched,error\n");
     }
-    if (!state.success) {
+    if (state.success == false) {
         result.error = state.error;
         delete[] dataset.items;
         return result;
     }
     bool incomplete = false;
     for (int i = 0; i < dataset.count; i++) {
-        if (cancelled) {
-            break;
-        }
-        if (result.error.empty() == false) {
+        if (cancelled || result.error.empty() == false) {
             break;
         }
         DatasetItem *item = &dataset.items[i];
+        BenchmarkStats *stats = &result.stats;
+        stats->total++;
         cout << "评测 " << i + 1 << "/" << dataset.count << "：" << item->db_id << "\n";
-        for (int mode = 0; mode < 2; mode++) {
-            if (cancelled) {
-                break;
+        Database db;
+        Database reference;
+        QueryRun run;
+        QueryResult gold;
+        string error;
+        string match;
+        TextResult path = dataset_database(dataset.root, item->db_id);
+        DatabaseOptions limits = config->database;
+        limits.max_display_rows = 100000;
+        limits.max_result_bytes = 16 * 1024 * 1024;
+        Status opened;
+        if (path.success) {
+            opened = open_database(&db, path.text, limits);
+        } else {
+            opened = failed_status(path.error);
+        }
+        if (opened.success) {
+            Completion source;
+            source.api = config->api;
+            run = run_query(&db, item->question, &source, false);
+            error = run.error;
+            if (run.api_error) {
+                result.error = run.error;
             }
-            if (result.error.empty() == false) {
-                break;
-            }
-            string name = "baseline";
-            int attempts = 1;
-            BenchmarkStats *stats = &result.baseline;
-            if (mode == 1) {
-                name = "corrected";
-                attempts = query_limit(&config->agent);
-                stats = &result.corrected;
-            }
-            stats->total++;
-            Database db;
-            Database evaluation;
-            Database reference;
-            QueryRun run;
-            QueryResult *query = &run.query;
-            QueryResult gold;
-            QueryResult prediction;
-            string error;
-            string match;
-            TextResult path = dataset_database(dataset.root, item->db_id);
-            Status opened;
-            if (!path.success) {
-                opened = failed_status(path.error);
-            } else {
-                opened = open_database(&db, path.text, config->database);
-            }
-            if (!opened.success) {
-                error = opened.error;
-            } else {
-                Completion source;
-                source.api = config->api;
-                run = run_query(&db, item->question, &source, attempts);
-                error = run.error;
-                if (run.success) {
-                    stats->executed++;
-                }
-                if (run.api_error) {
-                    result.error = run.error;
-                }
-                if (run.success) {
-                    DatabaseOptions limits = config->database;
-                    limits.max_display_rows = 100000;
-                    limits.max_result_bytes = 16 * 1024 * 1024;
-                    opened = open_database(&evaluation, path.text, limits);
-                    limits.reference_double_quoted_strings = true;
-                    if (opened.success) {
-                        opened = open_database(&reference, path.text, limits);
-                    }
-                    if (!opened.success) {
-                        error = opened.error;
+            if (run.success) {
+                stats->executed++;
+                limits.reference_double_quoted_strings = true;
+                opened = open_database(&reference, path.text, limits);
+                if (opened.success) {
+                    gold = execute_sql(&reference, item->query);
+                    QueryResult *query = &run.query;
+                    if (gold.success == false) {
+                        error = "标准 SQL 失败：" + gold.error;
+                    } else if (gold.truncated || query->truncated) {
+                        error = "结果超过评测上限，不参与比较";
                     } else {
-                        gold = execute_sql(&reference, item->query);
-                        prediction = execute_sql(&evaluation, query->sql);
-                        if (!gold.success) {
-                            error = "标准 SQL 失败：" + gold.error;
-                        } else if (!prediction.success) {
-                            error = "评测查询失败：" + prediction.error;
-                        } else if (gold.truncated || prediction.truncated) {
-                            error = "结果超过评测上限，不参与比较";
-                        } else {
-                            match = "0";
-                            if (equivalent_results(&prediction, &gold,
-                                                   has_outer_order_by(item->query))) {
-                                match = "1";
-                                stats->matched++;
-                            }
+                        match = "0";
+                        if (equivalent_results(query, &gold, has_outer_order_by(item->query))) {
+                            match = "1";
+                            stats->matched++;
                         }
                     }
                 }
             }
-            if (opened.success == false) {
-                incomplete = true;
-            }
-            if (run.success) {
-                if (match.empty()) {
-                    incomplete = true;
-                }
-            }
-            string executed = "0";
-            if (run.success) {
-                executed = "1";
-            }
-            string row = csv_field(item->question) + "," + csv_field(item->db_id) + "," + name +
-                         "," + csv_field(query->sql) + "," + executed + "," + match + "," +
-                         csv_field(error) + "\n";
-            state = write_output(&output, row);
-            if (!state.success) {
-                result.error = state.error;
-            }
-            free_query(&run.query);
-            free_query(&gold);
-            free_query(&prediction);
-            close_database(&db);
-            close_database(&evaluation);
-            close_database(&reference);
         }
+        if (opened.success == false) {
+            error = opened.error;
+            incomplete = true;
+        }
+        if (run.success && match.empty()) {
+            incomplete = true;
+        }
+        string executed = "0";
+        if (run.success) {
+            executed = "1";
+        }
+        QueryResult *query = &run.query;
+        string row = csv_field(item->question) + "," + csv_field(item->db_id) + "," +
+                     csv_field(query->sql) + "," + executed + "," + match + "," + csv_field(error) +
+                     "\n";
+        state = write_output(&output, row);
+        if (state.success == false) {
+            result.error = state.error;
+        }
+        free_query(&run.query);
+        free_query(&gold);
+        close_database(&db);
+        close_database(&reference);
     }
     delete[] dataset.items;
     if (incomplete && result.error.empty()) {

@@ -54,16 +54,6 @@ bool read_api_config(cJSON *object, ApiOptions *api, string *error) {
     }
     return config_number(object, "max_tokens", &api->max_tokens, 1, 32768, error);
 }
-bool read_agent_config(cJSON *object, AgentOptions *agent, string *error) {
-    if (config_number(object, "max_steps", &agent->max_steps, 1, 100, error) == false) {
-        return false;
-    }
-    if (config_number(object, "max_sql_attempts", &agent->max_sql_attempts, 1, 100, error) ==
-        false) {
-        return false;
-    }
-    return config_number(object, "max_repairs", &agent->max_repairs, 0, 99, error);
-}
 bool read_database_config(cJSON *object, DatabaseOptions *db, string *path, string *error) {
     if (config_string(object, "path", path, error) == false) {
         return false;
@@ -102,8 +92,8 @@ ConfigResult load_config(string path, bool required) {
             result.error = "Config must be a valid JSON object";
             return result;
         }
-        const char *names[] = {"api", "agent", "database"};
-        for (int i = 0; i < 3; i++) {
+        const char *names[] = {"api", "database"};
+        for (int i = 0; i < 2; i++) {
             cJSON *section = json_field(object, names[i]);
             if (section == nullptr) {
                 continue;
@@ -117,9 +107,6 @@ ConfigResult load_config(string path, bool required) {
                 valid = read_api_config(section, &config->api, &result.error);
             }
             if (i == 1) {
-                valid = read_agent_config(section, &config->agent, &result.error);
-            }
-            if (i == 2) {
                 valid = read_database_config(section, &config->database, &config->database_path,
                                              &result.error);
             }

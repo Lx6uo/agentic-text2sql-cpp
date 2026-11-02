@@ -224,7 +224,7 @@ Status append_json_message(cJSON *messages, string role, string text) {
     }
     return ok_status();
 }
-TextResult sql_request_json(Completion *source) {
+TextResult model_request_json(Completion *source) {
     ApiOptions *api = &source->api;
     cJSON *body = cJSON_CreateObject();
     bool valid = true;
@@ -235,6 +235,9 @@ TextResult sql_request_json(Completion *source) {
         valid = false;
     }
     if (json_set(body, "stream", cJSON_CreateBool(false)) == false) {
+        valid = false;
+    }
+    if (json_set(body, "temperature", cJSON_CreateNumber(0)) == false) {
         valid = false;
     }
     if (json_set(body, "max_tokens", cJSON_CreateNumber(api->max_tokens)) == false) {
@@ -253,7 +256,7 @@ TextResult sql_request_json(Completion *source) {
     }
     return json_text(body);
 }
-TextResult read_sql_response(string text) {
+TextResult read_model_response(string text) {
     cJSON *object = json_parse(text);
     cJSON *choices = json_field(object, "choices");
     cJSON *choice = json_item(choices, 0);
@@ -262,13 +265,13 @@ TextResult read_sql_response(string text) {
     TextResult role = read_json_string(message, "role");
     TextResult content = read_json_string(message, "content");
     if (json_is_array(choices) == false) {
-        result.error = "模型未返回 SQL";
+        result.error = "模型未返回文本";
     } else if (role.success == false) {
-        result.error = "模型未返回 SQL";
+        result.error = "模型未返回文本";
     } else if (role.text != "assistant") {
-        result.error = "模型未返回 SQL";
+        result.error = "模型未返回文本";
     } else if (content.success == false) {
-        result.error = "模型未返回 SQL";
+        result.error = "模型未返回文本";
     }
     if (result.error.empty()) {
         if (json_has_field(choice, "finish_reason")) {
