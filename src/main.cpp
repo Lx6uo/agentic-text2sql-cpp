@@ -14,6 +14,7 @@ void cancel_request(int) {
     cancelled = 1;
 }
 string find_bundled_data(string executable) {
+    // 依次兼容直接运行、安装目录和构建目录的数据位置。
     string folder = parent_path(executable);
     string parent = parent_path(folder);
     string locations[5];
@@ -33,6 +34,7 @@ string find_bundled_data(string executable) {
     }
     return "";
 }
+// 统一处理参数和配置，再进入查询或手动评测。
 int application_main(int argc, char **argv) {
     signal(SIGINT, cancel_request);
     Args args = parse_arguments(argc, argv);
@@ -55,6 +57,7 @@ int application_main(int argc, char **argv) {
     if (args.benchmark) {
         return run_benchmark_prompt(config);
     }
+    // 数据库路径优先级：命令行 > 配置文件 > 内置数据库。
     string path = config->database_path;
     if (args.db_given) {
         path = args.db;
@@ -83,6 +86,7 @@ TextResult to_utf8(const wchar_t *value) {
     result.success = true;
     return result;
 }
+// Windows 入口先将命令行转为 UTF-8，再复用主流程。
 int main() {
     SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
@@ -91,6 +95,7 @@ int main() {
     if (wide == nullptr) {
         return 2;
     }
+    // values 持有字符串，保证 argv 指针在主流程期间有效。
     string *values = new (nothrow) string[argc];
     char **argv = new (nothrow) char *[argc];
     bool valid = values != nullptr && argv != nullptr;

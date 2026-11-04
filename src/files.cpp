@@ -19,6 +19,7 @@ string parent_path(string path) {
     fs::path parent = native.parent_path();
     return parent.u8string();
 }
+// 配置中的相对路径以配置文件目录为基准。
 string relative_path(string config_file, string path) {
     fs::path native = fs::u8path(path);
     if (native.is_absolute()) {
@@ -34,6 +35,7 @@ bool file_exists(string path) {
     fs::path native = fs::u8path(path);
     return fs::exists(native, error);
 }
+// 获取已存在路径的绝对形式，并解析符号链接。
 TextResult canonical_path(string path) {
     error_code error;
     fs::path native = fs::u8path(path);
@@ -46,6 +48,8 @@ TextResult canonical_path(string path) {
     result.text = resolved.u8string();
     return result;
 }
+// 检查路径是否仍在指定根目录内。
+// 调用前须解析真实路径，防止符号链接绕过目录边界。
 bool path_inside(string path, string root) {
     fs::path native = fs::u8path(path);
     fs::path base = fs::u8path(root);
@@ -65,6 +69,7 @@ bool path_inside(string path, string root) {
     }
     return true;
 }
+// 按容量上限读取文本，完整读到文件末尾才返回成功。
 TextResult read_text(string path, int max_bytes) {
     fs::path native = fs::u8path(path);
     ifstream input(native, ios::binary);
@@ -88,6 +93,7 @@ TextResult read_text(string path, int max_bytes) {
     result.success = true;
     return result;
 }
+// 创建输出目录并打开新文件，已有文件则返回错误。
 Status open_output(OutputFile *output, string path) {
     error_code error;
     fs::path native = fs::u8path(path);
@@ -104,6 +110,7 @@ Status open_output(OutputFile *output, string path) {
         return failed_status("文件");
     }
     if (exists) {
+        // 拒绝已有文件，避免覆盖历史评测结果。
         return failed_status("文件");
     }
     output->stream.open(native, ios::binary);
@@ -112,6 +119,7 @@ Status open_output(OutputFile *output, string path) {
     }
     return ok_status();
 }
+// 每次写入后刷新输出流，及时发现文件写入失败。
 Status write_output(OutputFile *output, string text) {
     output->stream.write(text.data(), (streamsize)text.length());
     output->stream.flush();
@@ -120,6 +128,7 @@ Status write_output(OutputFile *output, string text) {
     }
     return ok_status();
 }
+// 按 Spider 目录布局定位数据库，并校验目录边界。
 TextResult dataset_database(string root, string id) {
     // 数据库名称只能是简单名称，解析后的路径也必须留在数据集目录内。
     if (id.empty()) {
@@ -159,8 +168,9 @@ TextResult dataset_database(string root, string id) {
     }
     return resolved;
 }
+// 加载指定划分，返回本次评测所需的题目数组。
 DatasetResult load_dataset(BenchmarkOptions *options) {
-    // 只读取本次评测需要的题目，items 使用完后由调用者 delete[]。
+    // 只复制前 limit 道题；items 由调用者 delete[]。
     DatasetResult result;
     result.error = error_message("数据集");
     result.split = options->split;
@@ -177,6 +187,7 @@ DatasetResult load_dataset(BenchmarkOptions *options) {
     if (supported == false) {
         return result;
     }
+    // 校验数据集和 JSON 的真实路径，防止读取目录外文件。
     TextResult root = canonical_path(options->dataset);
     if (root.success == false) {
         return result;
@@ -208,6 +219,7 @@ DatasetResult load_dataset(BenchmarkOptions *options) {
     result.count = count;
     cJSON *item = json_first_item(array);
     bool valid = true;
+    // 复制必要字段，题目数组不依赖随后释放的 JSON 树。
     for (int i = 0; i < count; i++) {
         TextResult id = read_json_string(item, "db_id");
         TextResult question = read_json_string(item, "question");

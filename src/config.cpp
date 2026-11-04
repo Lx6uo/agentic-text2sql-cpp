@@ -1,4 +1,5 @@
 // 字段读取只返回成功/失败，配置错误在 load_config 出口统一处理。
+// 读取可选整数：缺省保留原值，填写时校验类型和范围。
 bool config_number(cJSON *object, const char *name, int *destination, int minimum, int maximum) {
     if (json_has_field(object, name) == false) {
         return true;
@@ -16,6 +17,7 @@ bool config_number(cJSON *object, const char *name, int *destination, int minimu
     *destination = (int)value.number;
     return true;
 }
+// 读取可选文本，缺省时保留原值，类型错误时返回失败。
 bool config_string(cJSON *object, const char *name, string *destination) {
     if (json_has_field(object, name) == false) {
         return true;
@@ -27,6 +29,7 @@ bool config_string(cJSON *object, const char *name, string *destination) {
     *destination = value.text;
     return true;
 }
+// 合并默认值、JSON 配置和环境变量，返回完整运行配置。
 ConfigResult load_config(string path, bool required) {
     ConfigResult result;
     result.error = error_message("配置");
@@ -39,6 +42,7 @@ ConfigResult load_config(string path, bool required) {
         TextResult text = read_text(path, 65536);
         cJSON *object = json_parse(text.text);
         valid = text.success && json_is_object(object);
+        // 分区校验字段，任一类型或范围错误都会使配置失败。
         cJSON *section = json_field(object, "api");
         if (section != nullptr) {
             if (json_is_object(section) == false) {
@@ -60,6 +64,7 @@ ConfigResult load_config(string path, bool required) {
                 valid = false;
             }
         }
+        // 数据库分区集中设置查询结果和模型预览的上限。
         section = json_field(object, "database");
         if (section != nullptr) {
             if (json_is_object(section) == false) {
@@ -89,6 +94,7 @@ ConfigResult load_config(string path, bool required) {
         }
         free_json(object);
     } else if (required) {
+        // 显式指定 --config 时，配置文件必须存在。
         valid = false;
     }
     if (valid == false) {
@@ -98,6 +104,7 @@ ConfigResult load_config(string path, bool required) {
         // 相对数据库路径以配置文件所在目录为基准。
         config->database_path = relative_path(path, config->database_path);
     }
+    // 环境变量优先于文件配置，空值也会覆盖原密钥。
 #ifdef _WIN32
     char *key = nullptr;
     size_t length = 0;

@@ -10,7 +10,7 @@
     "path": "data/college_2.sqlite",
     "timeout_ms": 5000,
     "max_display_rows": 100,
-    "max_preview_rows": 10,
+    "max_preview_rows": 100,
     "max_sql_bytes": 16384,
     "max_result_bytes": 1048576
   }

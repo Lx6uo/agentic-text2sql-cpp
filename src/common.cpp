@@ -19,8 +19,10 @@
 #include <shellapi.h>
 #endif
 using namespace std;
+// 信号处理只设标记，由 HTTP 和 SQLite 回调响应取消。
 volatile sig_atomic_t cancelled = 0;
 
+// 通用返回状态：success 表示成功，error 保存失败提示。
 struct Status {
     bool success = false;
     string error;
@@ -30,12 +32,14 @@ struct TextResult {
     string error;
     string text;
 };
+// 交互查询和评测共用的超时、容量与行数限制。
 struct DatabaseOptions {
     int timeout_ms = 5000;
     int max_display_rows = 100;
     int max_sql_bytes = 16384;
     int max_result_bytes = 1048576;
-    int max_preview_rows = 10;
+    int max_preview_rows = 100;
+    // 标准答案连接兼容 Spider 中的双引号字符串。
     bool reference_double_quoted_strings = false;
 };
 struct Database {
@@ -45,6 +49,7 @@ struct Database {
     bool timed_out = false;
     double deadline = 0;
 };
+// 保留 SQLite 数据类型，供结果显示和评测比较使用。
 struct Cell {
     int type = SQLITE_NULL;
     long long integer = 0;
@@ -54,7 +59,7 @@ struct Cell {
 struct QueryRow {
     Cell *cells = nullptr;
 };
-// 行数组按本次行数上限一次分配，不再扩容；使用后 free_query。
+// 行数组一次分配，由调用者使用后调用 free_query 释放。
 struct QueryResult {
     bool success = false;
     string error;
@@ -99,6 +104,7 @@ struct QueryRun {
     TextResult analysis;
     QueryResult query;
 };
+// 手动评测的输入参数及统计结果。
 struct BenchmarkOptions {
     string dataset;
     string output;
@@ -132,6 +138,7 @@ struct DatasetResult {
 struct OutputFile {
     ofstream stream;
 };
+// 区分默认参数和显式参数，便于校验及确定优先级。
 struct Args {
     bool success = false;
     bool help = false;
@@ -221,6 +228,7 @@ string trim(string text) {
     return text.substr(first, last - first + 1);
 }
 double now_ms() {
+    // 单调时钟不受系统时间调整影响，适合判断超时。
 #ifdef _WIN32
     return (double)GetTickCount64();
 #else

@@ -36,6 +36,7 @@ bool cell_equal(Cell *a, Cell *b) {
     }
     return a->text == b->text;
 }
+// 排序按类型和值确定顺序，浮点容差仅用于相等判断。
 bool less_cell(Cell *a, Cell *b) {
     if (numeric_cell(a) && numeric_cell(b)) {
         return cell_number(a) < cell_number(b);
@@ -81,8 +82,9 @@ void sort_row_indices(QueryResult *result, int *indices) {
     qsort(indices, result->row_count, sizeof(int), compare_row_indices);
     sorting_query = nullptr;
 }
+// 按列位置比较；有外层 ORDER BY 时保留行顺序，否则先排序行号。
 bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered) {
-    // 按列位置比较；有外层 ORDER BY 时保留行顺序，否则先排序行号。
+    // 只比较完整且形状一致的结果，截断不能算作匹配。
     if (prediction->success == false) {
         return false;
     }
@@ -105,6 +107,7 @@ bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered
     if (count == 0) {
         return true;
     }
+    // 用两组行号对应待比较数据，保持原结果不变。
     int *left = new (nothrow) int[count];
     int *right = new (nothrow) int[count];
     bool allocation_failed = false;
@@ -125,6 +128,7 @@ bool equivalent_results(QueryResult *prediction, QueryResult *gold, bool ordered
             right[i] = i;
         }
     } else {
+        // 排序行号仍保留重复行，避免按集合比较丢失数量。
         sort_row_indices(prediction, left);
         sort_row_indices(gold, right);
     }
@@ -154,6 +158,7 @@ struct OrderState {
     string token;
     string last;
 };
+// 只在括号外匹配连续的 ORDER、BY 标记。
 bool finish_order_token(OrderState *state) {
     if (state->token.empty()) {
         return false;
@@ -182,6 +187,7 @@ bool is_sql_quote(char value) {
     }
     return false;
 }
+// 跳过引号、注释和括号内排序，只识别最外层 ORDER BY。
 bool has_outer_order_by(string sql) {
     OrderState state;
     for (int i = 0; i < (int)sql.length(); i++) {
@@ -192,6 +198,7 @@ bool has_outer_order_by(string sql) {
         }
         bool line_comment = c == '-' && next == '-';
         bool block_comment = c == '/' && next == '*';
+        // 引号内文本和注释不参与排序关键词判断。
         if (state.quote != 0) {
             if (c == state.quote) {
                 if (i + 1 < (int)sql.length() && sql[i + 1] == state.quote) {
@@ -252,6 +259,7 @@ bool has_outer_order_by(string sql) {
     return finish_order_token(&state);
 }
 
+// CSV 字段统一加引号，内部双引号重复转义。
 string csv_field(string text) {
     string result = "\"";
     for (int i = 0; i < (int)text.length(); i++) {
@@ -262,13 +270,14 @@ string csv_field(string text) {
     }
     return result + '"';
 }
-// 手动评测只有一种生成方式，每题不请求分析，保留标准 SQL 结果比较。
+// 每题生成一次 SQL，不请求分析，在本地比较标准答案并写入 CSV。
 BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
     BenchmarkResult result;
     if (options->limit < 1 || options->limit > 100000) {
         result.error = error_message("数据集");
         return result;
     }
+    // 先准备数据集和输出文件，失败时不发起模型请求。
     DatasetResult dataset = load_dataset(options);
     if (dataset.success == false) {
         result.error = dataset.error;
@@ -296,8 +305,10 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
         }
         DatasetItem *item = &dataset.items[i];
         BenchmarkStats *stats = &result.stats;
+        // 失败题也计入分母，统计实际尝试的题数。
         stats->total++;
         cout << "评测 " << i + 1 << "/" << dataset.count << "：" << item->db_id << "\n";
+        // 每题独立创建预测和参考连接，避免配置相互影响。
         Database db;
         Database reference;
         QueryRun run;
@@ -324,6 +335,7 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
             }
             if (run.success) {
                 stats->executed++;
+                // 仅标准答案放宽双引号字符串规则。
                 limits.reference_double_quoted_strings = true;
                 opened = open_database(&reference, path.text, limits);
                 if (opened.success) {
@@ -333,6 +345,7 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
                     if (gold.success == false || gold.truncated || query->truncated) {
                         error = error_message("数据集");
                     } else {
+                        // 空值表示未完成比较，0 表示已比较但不一致。
                         match = "0";
                         if (equivalent_results(query, &gold, has_outer_order_by(item->query))) {
                             match = "1";
@@ -354,6 +367,7 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
             executed = "1";
         }
         QueryResult *query = &run.query;
+        // 每题立即写出状态，保留评测中途停止前的结果。
         string row = csv_field(item->question) + "," + csv_field(item->db_id) + "," +
                      csv_field(query->sql) + "," + executed + "," + match + "," + csv_field(error) +
                      "\n";
@@ -367,6 +381,7 @@ BenchmarkResult run_benchmark(BenchmarkOptions *options, Config *config) {
         close_database(&reference);
     }
     delete[] dataset.items;
+    // 区分预测不匹配与参考查询或资源失败导致的评测未完成。
     if (incomplete && result.error.empty()) {
         result.error = error_message("数据集");
     }

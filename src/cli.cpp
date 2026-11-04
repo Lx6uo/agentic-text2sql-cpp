@@ -7,6 +7,7 @@ void print_help() {
          << "      text2sql [--config 配置文件] benchmark\n"
          << "默认直接输入自然语言；/help 查看引导，/exit 退出。\n";
 }
+// 解析启动选项，拒绝重复参数及 --db 与 benchmark 混用。
 Args parse_arguments(int argc, char **argv) {
     Args args;
     args.error = error_message("参数");
@@ -50,6 +51,7 @@ Args parse_arguments(int argc, char **argv) {
     args.error.clear();
     return args;
 }
+// 读取限定范围内的正整数，拒绝其他字符和超限值。
 bool parse_positive_int(string text, int *number, int maximum) {
     if (text.empty()) {
         return false;
@@ -63,6 +65,7 @@ bool parse_positive_int(string text, int *number, int maximum) {
             return false;
         }
         int digit = text[i] - '0';
+        // 累积前检查上限，避免整数溢出。
         if (value > (maximum - digit) / 10) {
             return false;
         }
@@ -83,6 +86,7 @@ string ask_text(string label) {
     getline(cin, text);
     return trim(text);
 }
+// 接受带引号的路径输入，去掉两端配对的引号。
 string ask_path(string label) {
     string path = ask_text(label);
     if (path.length() > 1) {
@@ -94,6 +98,7 @@ string ask_path(string label) {
     }
     return path;
 }
+// 清理控制字符并缩短单元格文本，保持终端输出可读。
 string display_text(string text) {
     for (int i = 0; i < (int)text.length(); i++) {
         unsigned char c = text[i];
@@ -106,6 +111,7 @@ string display_text(string text) {
     }
     if (text.length() > 160) {
         int end = 160;
+        // 回退到 UTF-8 字符边界，避免截断中文字符。
         while (end > 0) {
             if (is_utf8_tail((unsigned char)text[end]) == false) {
                 break;
@@ -135,6 +141,7 @@ void print_table(QueryResult *result) {
     }
     cout << '\n';
 }
+// 保留换行和制表符，将其余控制字符替换为空格。
 void print_analysis_text(string text) {
     for (int i = 0; i < (int)text.length(); i++) {
         unsigned char c = text[i];
@@ -148,8 +155,8 @@ void print_analysis_text(string text) {
     }
     cout << '\n';
 }
+// 先显示 SQL 和查询结果，分析输出由独立函数处理。
 void print_result(QueryRun *result) {
-    // 分开显示 SQL、执行结果和分析；分析失败不会遮住已经查询到的数据。
     if (result->invalid_input) {
         cout << invalid_query_hint << '\n';
         return;
@@ -168,6 +175,9 @@ void print_result(QueryRun *result) {
         print_error(result->error);
     }
     cout << "--------------------------------\n";
+}
+// 分析失败时只显示分析提示，不重复打印已有查询结果。
+void print_analysis_result(QueryRun *result) {
     if (result->success) {
         TextResult *analysis = &result->analysis;
         cout << "\n分析结果\n--------------------------------\n";
@@ -179,6 +189,7 @@ void print_result(QueryRun *result) {
         cout << "--------------------------------\n";
     }
 }
+// 成功率以实际尝试题数为分母，零题时显示 0%。
 void print_stats(string name, BenchmarkStats *stats) {
     double executed = 0;
     double matched = 0;
@@ -189,12 +200,14 @@ void print_stats(string name, BenchmarkStats *stats) {
     cout << name << "：" << stats->total << " 题，执行成功率 " << executed << "% ，结果一致率 "
          << matched << "%\n";
 }
+// 收集评测参数，运行后显示统计和 CSV 文件位置。
 int run_benchmark_prompt(Config *config) {
     ApiOptions *api = &config->api;
     if (api->api_key.empty()) {
         print_error("请先配置 API Key");
         return 1;
     }
+    // 留空采用默认值，路径和题数分别按输入类型处理。
     BenchmarkOptions options;
     options.dataset = ask_path("Spider 数据集目录 [内置数据集]：");
     if (options.dataset.empty()) {
@@ -238,8 +251,8 @@ void print_guide(string table) {
     }
     cout << "输入 /help 查看引导，/exit 退出。\n\n";
 }
+// 整个会话共用数据库连接，每次提问重新建立模型上下文。
 int run_chat(Config *config, string path) {
-    // 整个会话共用一个数据库连接，每次提问重新建立模型上下文。
     ApiOptions *api = &config->api;
     cout << "SQLite 自然语言查询\n";
     if (path.empty()) {
@@ -248,6 +261,7 @@ int run_chat(Config *config, string path) {
     if (!cin) {
         return 0;
     }
+    // 连接数据库，并选取一个表名作为提问示例。
     Database db;
     Status opened = open_database(&db, path, config->database);
     if (!opened.success) {
@@ -269,6 +283,7 @@ int run_chat(Config *config, string path) {
     if (api->api_key.empty()) {
         cout << "请在 JSON 配置或 DEEPSEEK_API_KEY 中配置自己的 AI 密钥。\n";
     }
+    // 本地处理控制命令，普通问题才进入模型查询流程。
     while (!cancelled) {
         string question = ask_text("你：");
         if (!cin) {
@@ -293,13 +308,21 @@ int run_chat(Config *config, string path) {
             continue;
         }
         cout << "正在处理…\n";
+        // 每个问题使用独立上下文，先显示查询结果再分析。
         Completion source;
         source.api = config->api;
-        QueryRun result = run_query(&db, question, &source, true);
+        QueryRun result = run_query(&db, question, &source, false);
         print_result(&result);
+        if (result.success && !cancelled) {
+            cout << "\n正在分析…\n" << flush;
+            result.analysis = analyze_result(question, &result.query, &source,
+                                             config->database.max_preview_rows);
+            print_analysis_result(&result);
+        }
         free_query(&result.query);
         cout << '\n';
     }
+    // 会话结束统一关闭连接，Ctrl+C 对应退出码 130。
     close_database(&db);
     if (cancelled) {
         return 130;

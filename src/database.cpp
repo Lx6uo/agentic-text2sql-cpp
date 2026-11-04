@@ -1,6 +1,6 @@
 // SQLite 的调用集中在这个文件。结果用 QueryResult 和动态数组保存。
+// 先释放每行的单元格，再释放行数组，可用于失败后的清理。
 void free_query(QueryResult *result) {
-    // 先释放每行的单元格，再释放保存这些行的数组。
     for (int i = 0; i < result->row_count; i++) {
         QueryRow *row = &result->rows[i];
         delete[] row->cells;
@@ -9,6 +9,7 @@ void free_query(QueryResult *result) {
     result->rows = nullptr;
     result->row_count = 0;
 }
+// SQL 编译时检查操作和函数，拒绝未授权行为。
 int database_authorize(void *context, int action, const char *, const char *arg2, const char *,
                        const char *) {
     Database *db = (Database *)context;
@@ -103,6 +104,7 @@ int database_authorize(void *context, int action, const char *, const char *arg2
     }
     return SQLITE_DENY;
 }
+// 执行中检查取消和超时，返回非零值通知 SQLite 中止。
 int database_progress(void *context) {
     Database *db = (Database *)context;
     if (cancelled) {
@@ -114,6 +116,7 @@ int database_progress(void *context) {
     }
     return 0;
 }
+// 先移除回调，再关闭连接并清空句柄。
 void close_database(Database *db) {
     if (db->connection != nullptr) {
         sqlite3_progress_handler(db->connection, 0, nullptr, nullptr);
@@ -122,6 +125,7 @@ void close_database(Database *db) {
         db->connection = nullptr;
     }
 }
+// 只读设置、授权回调和资源上限共同约束模型 SQL。
 Status configure_database(Database *db) {
     DatabaseOptions *options = &db->options;
     int dqs = 0;
@@ -136,6 +140,7 @@ Status configure_database(Database *db) {
         return failed_status("数据库");
     }
     sqlite3_busy_timeout(db->connection, options->timeout_ms);
+    // 限制 SQL、结果大小和执行复杂度，禁止附加数据库。
     sqlite3_limit(db->connection, SQLITE_LIMIT_LENGTH, 1048576);
     sqlite3_limit(db->connection, SQLITE_LIMIT_SQL_LENGTH, options->max_sql_bytes);
     sqlite3_limit(db->connection, SQLITE_LIMIT_COLUMN, 128);
@@ -146,14 +151,18 @@ Status configure_database(Database *db) {
     sqlite3_set_authorizer(db->connection, database_authorize, db);
     return ok_status();
 }
+// 用已验证的新连接替换原连接。
 void install_database(Database *db, Database *opened) {
     close_database(db);
+    // 转移连接所有权，来源对象不再负责关闭它。
     db->connection = opened->connection;
     opened->connection = nullptr;
     db->options = opened->options;
     db->internal = false;
+    // 回调绑定到接收连接的对象，避免引用局部变量。
     sqlite3_set_authorizer(db->connection, database_authorize, db);
 }
+// 以只读方式打开已有数据库，验证结构后才安装连接。
 Status open_database(Database *db, string path, DatabaseOptions options) {
     bool valid = true;
     if (path.empty()) {
@@ -168,6 +177,7 @@ Status open_database(Database *db, string path, DatabaseOptions options) {
     if (valid == false) {
         return failed_status("数据库");
     }
+    // 新连接验证通过后才替换原连接。
     Database opened;
     opened.options = options;
     int code = sqlite3_open_v2(path.c_str(), &opened.connection,
@@ -188,6 +198,7 @@ Status open_database(Database *db, string path, DatabaseOptions options) {
     install_database(db, &opened);
     return ok_status();
 }
+// 复制 SQLite 临时数据，避免下一次 step 后失效。
 Cell read_cell(sqlite3_stmt *statement, int column) {
     Cell result;
     result.type = sqlite3_column_type(statement, column);
@@ -204,6 +215,7 @@ Cell read_cell(sqlite3_stmt *statement, int column) {
             result.text.assign(text, bytes);
         }
     }
+    // BLOB 转为十六进制保存，便于显示和逐值比较。
     if (result.type == SQLITE_BLOB) {
         const unsigned char *bytes = (const unsigned char *)sqlite3_column_blob(statement, column);
         const char *digits = "0123456789abcdef";
@@ -214,7 +226,7 @@ Cell read_cell(sqlite3_stmt *statement, int column) {
     }
     return result;
 }
-// 各阶段只记录是否成功，函数出口统一报错和清理。
+// 执行单条只读 SQL，按行数、容量和超时限制读取结果。
 QueryResult execute_sql(Database *db, string sql, int row_limit) {
     QueryResult result;
     result.sql = sql;
@@ -223,6 +235,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
     db->timed_out = false;
     sqlite3_stmt *statement = nullptr;
     sqlite3_stmt *extra = nullptr;
+    // 先校验输入和读取上限，再交给 SQLite 编译检查。
     bool ready = db->connection != nullptr && !cancelled;
     if ((int)sql.length() > options->max_sql_bytes) {
         ready = false;
@@ -237,6 +250,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
         ready = false;
     }
     if (ready) {
+        // 开启进度回调，编译时检查单条语句、只读性和列数。
         sqlite3_progress_handler(db->connection, 1000, database_progress, db);
         const char *tail = nullptr;
         int code = sqlite3_prepare_v3(db->connection, sql.c_str(), (int)sql.length() + 1, 0,
@@ -259,6 +273,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
         for (int c = 0; c < result.column_count; c++) {
             result.columns[c] = sqlite3_column_name(statement, c);
         }
+        // 行数组一次分配，单元格在读取时逐行分配。
         result.rows = new (nothrow) QueryRow[row_limit];
         ready = result.rows != nullptr;
     }
@@ -280,6 +295,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
         if (code != SQLITE_ROW) {
             break;
         }
+        // 多读一行，确认是否仍有数据后再标记截断。
         if (result.row_count == row_limit) {
             result.success = true;
             result.truncated = true;
@@ -289,6 +305,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
         if (cells == nullptr) {
             break;
         }
+        // 估算本行容量，超限时保留此前读取的完整行。
         int row_bytes = 2;
         for (int c = 0; c < result.column_count; c++) {
             cells[c] = read_cell(statement, c);
@@ -316,6 +333,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
     if (result.timed_out || result.cancelled) {
         result.success = false;
     }
+    // 所有执行分支统一释放语句、移除回调，并清理失败结果。
     sqlite3_finalize(extra);
     sqlite3_finalize(statement);
     if (db->connection != nullptr) {
@@ -327,6 +345,7 @@ QueryResult execute_sql(Database *db, string sql, int row_limit) {
     }
     return result;
 }
+// 标识符用双引号包围，内部双引号重复转义。
 string quote_name(string name) {
     string result = "\"";
     for (int i = 0; i < (int)name.length(); i++) {
@@ -337,6 +356,7 @@ string quote_name(string name) {
     }
     return result + '"';
 }
+// 结构查询使用内部授权和固定容量，结束后恢复原设置。
 QueryResult internal_query(Database *db, string sql) {
     DatabaseOptions *options = &db->options;
     db->internal = true;
@@ -345,6 +365,7 @@ QueryResult internal_query(Database *db, string sql) {
     QueryResult result = execute_sql(db, sql, 10000);
     options->max_result_bytes = original_bytes;
     db->internal = false;
+    // 结构信息必须完整，截断时按读取失败处理。
     if (result.truncated) {
         result.success = false;
         result.error = error_message("数据库");
@@ -352,13 +373,14 @@ QueryResult internal_query(Database *db, string sql) {
     }
     return result;
 }
+// 读取用户表和视图，排除 SQLite 自带对象。
 QueryResult list_tables(Database *db) {
     return internal_query(db, "SELECT name, type FROM sqlite_schema WHERE type IN ('table','view') "
                               "AND name NOT GLOB 'sqlite_*' ORDER BY name");
 }
 
+// 读取表、字段和外键，拼成生成 SQL 的数据库上下文。
 TextResult read_schema(Database *db) {
-    // 读取表、字段和外键，拼成生成 SQL 时使用的数据库上下文。
     TextResult result;
     QueryResult tables = list_tables(db);
     if (!tables.success) {
@@ -397,6 +419,7 @@ TextResult read_schema(Database *db) {
                            "." + quote_name(key[4].text) + "\n";
         }
         free_query(&keys);
+        // 结构上下文也有容量上限，避免模型请求过大。
         if (result.text.length() > 500000) {
             result.error = error_message("数据库");
         }
