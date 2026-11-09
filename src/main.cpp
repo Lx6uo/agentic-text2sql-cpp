@@ -7,23 +7,21 @@
 #include "config.cpp"
 #include "llm.cpp"
 #include "agent.cpp"
-#include "benchmark.cpp"
 #include "cli.cpp"
 
 void cancel_request(int) {
     cancelled = 1;
 }
 string find_bundled_data(string executable) {
-    // 依次兼容直接运行、安装目录和构建目录的数据位置。
+    // 依次兼容直接运行、多配置构建目录和复制后的数据位置。
     string folder = parent_path(executable);
     string parent = parent_path(folder);
-    string locations[5];
+    string locations[4];
     locations[0] = join_path(folder, "data");
     locations[1] = join_path(parent, "data");
-    locations[2] = join_path(parent, "share/text2sql/data");
-    locations[3] = TEXT2SQL_DATA_DIR;
-    locations[4] = "data";
-    for (int i = 0; i < 5; i++) {
+    locations[2] = TEXT2SQL_DATA_DIR;
+    locations[3] = "data";
+    for (int i = 0; i < 4; i++) {
         string database = join_path(locations[i], "college_2.sqlite");
         if (file_exists(database)) {
             TextResult path = canonical_path(locations[i]);
@@ -34,7 +32,7 @@ string find_bundled_data(string executable) {
     }
     return "";
 }
-// 统一处理参数和配置，再进入查询或手动评测。
+// 统一处理参数和配置，再进入自然语言查询。
 int application_main(int argc, char **argv) {
     signal(SIGINT, cancel_request);
     Args args = parse_arguments(argc, argv);
@@ -54,9 +52,6 @@ int application_main(int argc, char **argv) {
     }
     Config *config = &loaded.config;
     config->bundled_data = find_bundled_data(argv[0]);
-    if (args.benchmark) {
-        return run_benchmark_prompt(config);
-    }
     // 数据库路径优先级：命令行 > 配置文件 > 内置数据库。
     string path = config->database_path;
     if (args.db_given) {

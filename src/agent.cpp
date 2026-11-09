@@ -153,8 +153,8 @@ TextResult analyze_result(string question, QueryResult *query, Completion *sourc
     close_completion(source);
     return result;
 }
-// 单次查询：读取结构、生成 SQL、执行，再按需分析结果。
-QueryRun run_query(Database *db, string question, Completion *source, bool with_analysis) {
+// 单次查询：读取结构、生成并执行 SQL，结果分析由 CLI 单独调用。
+QueryRun run_query(Database *db, string question, Completion *source) {
     QueryRun result;
     close_completion(source);
     if (trim(question).empty() || question.length() > 16384) {
@@ -183,11 +183,5 @@ QueryRun run_query(Database *db, string question, Completion *source, bool with_
         return result;
     }
     result = execute_reply(db, reply.text);
-    // 分析状态单独保存，不改变已成功的查询状态。
-    if (result.success && with_analysis) {
-        DatabaseOptions *options = &db->options;
-        result.analysis =
-            analyze_result(question, &result.query, source, options->max_preview_rows);
-    }
     return result;
 }

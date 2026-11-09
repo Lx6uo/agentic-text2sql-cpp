@@ -128,13 +128,9 @@ void close_database(Database *db) {
 // 只读设置、授权回调和资源上限共同约束模型 SQL。
 Status configure_database(Database *db) {
     DatabaseOptions *options = &db->options;
-    int dqs = 0;
-    if (options->reference_double_quoted_strings) {
-        dqs = 1;
-    }
     sqlite3_db_config(db->connection, SQLITE_DBCONFIG_DEFENSIVE, 1, nullptr);
     sqlite3_db_config(db->connection, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0, nullptr);
-    sqlite3_db_config(db->connection, SQLITE_DBCONFIG_DQS_DML, dqs, nullptr);
+    sqlite3_db_config(db->connection, SQLITE_DBCONFIG_DQS_DML, 0, nullptr);
     if (sqlite3_exec(db->connection, "PRAGMA query_only=ON", nullptr, nullptr, nullptr) !=
         SQLITE_OK) {
         return failed_status("数据库");

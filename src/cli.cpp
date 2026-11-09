@@ -4,10 +4,9 @@ void print_error(string error) {
 }
 void print_help() {
     cout << "用法：text2sql [--config 配置文件] [--db SQLite文件]\n"
-         << "      text2sql [--config 配置文件] benchmark\n"
          << "默认直接输入自然语言；/help 查看引导，/exit 退出。\n";
 }
-// 解析启动选项，拒绝重复参数及 --db 与 benchmark 混用。
+// 解析启动选项，拒绝未知或重复参数。
 Args parse_arguments(int argc, char **argv) {
     Args args;
     args.error = error_message("参数");
@@ -15,11 +14,6 @@ Args parse_arguments(int argc, char **argv) {
         string value = argv[i];
         if (value == "--help" || value == "-h") {
             args.help = true;
-        } else if (value == "benchmark") {
-            if (args.benchmark) {
-                return args;
-            }
-            args.benchmark = true;
         } else if (value == "--db") {
             if (args.db_given) {
                 return args;
@@ -44,41 +38,9 @@ Args parse_arguments(int argc, char **argv) {
             return args;
         }
     }
-    if (args.db_given && args.benchmark) {
-        return args;
-    }
     args.success = true;
     args.error.clear();
     return args;
-}
-// 读取限定范围内的正整数，拒绝其他字符和超限值。
-bool parse_positive_int(string text, int *number, int maximum) {
-    if (text.empty()) {
-        return false;
-    }
-    int value = 0;
-    for (int i = 0; i < (int)text.length(); i++) {
-        if (text[i] < '0') {
-            return false;
-        }
-        if (text[i] > '9') {
-            return false;
-        }
-        int digit = text[i] - '0';
-        // 累积前检查上限，避免整数溢出。
-        if (value > (maximum - digit) / 10) {
-            return false;
-        }
-        value = value * 10 + digit;
-    }
-    if (value < 1) {
-        return false;
-    }
-    if (value > maximum) {
-        return false;
-    }
-    *number = value;
-    return true;
 }
 string ask_text(string label) {
     cout << label;
@@ -189,61 +151,6 @@ void print_analysis_result(QueryRun *result) {
         cout << "--------------------------------\n";
     }
 }
-// 成功率以实际尝试题数为分母，零题时显示 0%。
-void print_stats(string name, BenchmarkStats *stats) {
-    double executed = 0;
-    double matched = 0;
-    if (stats->total > 0) {
-        executed = 100.0 * stats->executed / stats->total;
-        matched = 100.0 * stats->matched / stats->total;
-    }
-    cout << name << "：" << stats->total << " 题，执行成功率 " << executed << "% ，结果一致率 "
-         << matched << "%\n";
-}
-// 收集评测参数，运行后显示统计和 CSV 文件位置。
-int run_benchmark_prompt(Config *config) {
-    ApiOptions *api = &config->api;
-    if (api->api_key.empty()) {
-        print_error("请先配置 API Key");
-        return 1;
-    }
-    // 留空采用默认值，路径和题数分别按输入类型处理。
-    BenchmarkOptions options;
-    options.dataset = ask_path("Spider 数据集目录 [内置数据集]：");
-    if (options.dataset.empty()) {
-        options.dataset = join_path(config->bundled_data, "spider");
-    }
-    string split = ask_text("数据划分 [dev]：");
-    if (!split.empty()) {
-        options.split = split;
-    }
-    string count = ask_text("评测题数 [20]：");
-    if (count.empty() == false) {
-        if (parse_positive_int(count, &options.limit, 100000) == false) {
-            print_error(error_message("参数"));
-            return 2;
-        }
-    }
-    options.output = ask_path("CSV 路径 [自动生成]：");
-    if (!cin) {
-        return 0;
-    }
-    BenchmarkResult result = run_benchmark(&options, config);
-    if (!result.success) {
-        print_error(result.error);
-    }
-    print_stats("单次 SQL 评测", &result.stats);
-    if (!result.output.empty()) {
-        cout << "CSV：" << result.output << '\n';
-    }
-    if (cancelled) {
-        return 130;
-    }
-    if (result.success) {
-        return 0;
-    }
-    return 1;
-}
 void print_guide(string table) {
     cout << "直接输入问题并按回车，每次查询后可以继续提问。\n";
     if (!table.empty()) {
@@ -311,7 +218,7 @@ int run_chat(Config *config, string path) {
         // 每个问题使用独立上下文，先显示查询结果再分析。
         Completion source;
         source.api = config->api;
-        QueryRun result = run_query(&db, question, &source, false);
+        QueryRun result = run_query(&db, question, &source);
         print_result(&result);
         if (result.success && !cancelled) {
             cout << "\n正在分析…\n" << flush;

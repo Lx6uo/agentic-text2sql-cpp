@@ -4,7 +4,6 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
-#include <ctime>
 #include <cstdio>
 #include <csignal>
 #include <cstring>
@@ -32,15 +31,13 @@ struct TextResult {
     string error;
     string text;
 };
-// 交互查询和评测共用的超时、容量与行数限制。
+// 查询和结果分析使用的超时、容量与行数限制。
 struct DatabaseOptions {
     int timeout_ms = 5000;
     int max_display_rows = 100;
     int max_sql_bytes = 16384;
     int max_result_bytes = 1048576;
     int max_preview_rows = 100;
-    // 标准答案连接兼容 Spider 中的双引号字符串。
-    bool reference_double_quoted_strings = false;
 };
 struct Database {
     sqlite3 *connection = nullptr;
@@ -49,7 +46,7 @@ struct Database {
     bool timed_out = false;
     double deadline = 0;
 };
-// 保留 SQLite 数据类型，供结果显示和评测比较使用。
+// 保留 SQLite 数据类型，供结果显示和分析使用。
 struct Cell {
     int type = SQLITE_NULL;
     long long integer = 0;
@@ -104,45 +101,10 @@ struct QueryRun {
     TextResult analysis;
     QueryResult query;
 };
-// 手动评测的输入参数及统计结果。
-struct BenchmarkOptions {
-    string dataset;
-    string output;
-    string split = "dev";
-    int limit = 20;
-};
-struct BenchmarkStats {
-    int total = 0;
-    int executed = 0;
-    int matched = 0;
-};
-struct BenchmarkResult {
-    bool success = false;
-    string error;
-    string output;
-    BenchmarkStats stats;
-};
-struct DatasetItem {
-    string db_id;
-    string question;
-    string query;
-};
-struct DatasetResult {
-    bool success = false;
-    string error;
-    string root;
-    string split;
-    int count = 0;
-    DatasetItem *items = nullptr;
-};
-struct OutputFile {
-    ofstream stream;
-};
 // 区分默认参数和显式参数，便于校验及确定优先级。
 struct Args {
     bool success = false;
     bool help = false;
-    bool benchmark = false;
     bool config_required = false;
     bool db_given = false;
     string error;
@@ -176,9 +138,6 @@ string error_message(string operation) {
     }
     if (operation == "SQL") {
         return "SQL 执行失败，请检查查询语句。";
-    }
-    if (operation == "数据集") {
-        return "数据集读取或评测失败，请检查数据和输出路径。";
     }
     return "数据处理失败，请检查输入。";
 }

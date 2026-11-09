@@ -1,6 +1,6 @@
 # SQLite 自然语言查询与结果分析
 
-使用 C++17、SQLite、cJSON 和 libcurl，将自然语言问题转换成只读 SQL。程序读取真实表结构，生成并执行一次 SQL，成功后再请求模型分析结果；终端分别显示 SQL、查询结果和分析文字。Benchmark 通过独立命令手动运行。
+使用 C++17、SQLite、cJSON 和 libcurl，将自然语言问题转换成只读 SQL。程序读取真实表结构，生成并执行一次 SQL，先显示 SQL 和查询结果，再请求模型分析结果并显示分析文字。评测结果直接记录在文档中。
 
 ## 文档入口
 
@@ -8,13 +8,13 @@
 
 | 文档 | 用途 |
 |---|---|
-| [README](README.md) | 安装、配置 API Key、启动查询和手动评测 |
-| [项目设计与技术文档](docs/design-and-implementation.md) | 流程、模块、基础 C++ 与指针、API 协议、数据库控制和评测规则 |
-| [汇报文档](docs/project-report.md) | 数据集背景、项目目标、实现效果、验证结果和现场汇报提纲 |
+| [README](README.md) | 构建环境、配置 API Key、启动查询和数据使用 |
+| [项目设计与技术文档](docs/design-and-implementation.md) | 流程、模块、基础 C++ 与指针、API 协议、数据库控制和评测记录方式 |
+| [汇报文档](docs/project-report.md) | 数据集背景、项目目标、实现效果、评测记录和现场汇报提纲 |
 
 ## 构建和启动
 
-仓库直接包含默认数据库 [college_2.sqlite](data/college_2.sqlite)，约 2 MiB，有 11 张表、2000 名学生、50 名教师和 200 门课程。完整 Spider 运行数据也随仓库提供，编译时自动解压，无需另行下载数据或使用 Git LFS。
+仓库直接包含默认数据库 [college_2.sqlite](data/college_2.sqlite)，约 2 MiB，有 11 张表、2000 名学生、50 名教师和 200 门课程。Clone 后构建即可启动默认查询，无需下载或解压数据。完整 Spider ZIP 仍随仓库提供，构建过程只复制现成的 SQLite 文件和小型样例，不读取 ZIP、不自动解压或校验归档。
 
 需要 C++17 编译器、CMake ≥ 3.20 和 libcurl ≥ 7.68。SQLite 3.50.4、cJSON 1.7.19 的固定源码已经包含在仓库中。
 
@@ -91,30 +91,30 @@ SQL 执行失败会显示统一错误，随后可以继续提问；分析失败�
 
 EOF 正常退出，Ctrl+C 取消请求或 SQL，退出码为 130。
 
-## 手动运行 Benchmark
+## 评测记录与其他数据库
+
+项目已移除评测命令、统计、CSV 导出和结果比较工具。已有两题样例的历史结果、大学数据库的查询结果及评价范围保存在[汇报文档](docs/project-report.md#44-功能验证与评价范围)。新增评测采用人工核对，并在文档记录问题、数据库、SQL、预期与实际结果、日期、版本和模型；方法见[技术文档](docs/design-and-implementation.md#7-文档评测记录)。
+
+默认大学库和 company 小型库已经是可直接打开的 SQLite 文件，例如：
 
 ```bash
-./build/text2sql benchmark
-# 使用指定配置
-./build/text2sql --config config.json benchmark
+./build/text2sql --db data/company.sqlite
 ```
 
-依次输入数据集目录、划分、题数和 CSV 路径。目录留空使用完整 Spider，划分默认 `dev`，题数默认 20，CSV 路径留空自动生成。支持 `dev`、`train_spider`、`train_others`、`test`，`train` 是 `train_spider` 的别名。
+完整题目、数据库与标准 SQL 仍保存在 `data/spider.zip`。需要其中其他数据库时，手动解压到一个目录，再通过 `--db` 指向具体 SQLite 文件；Windows 可在资源管理器中使用“全部提取”，例如在项目根目录解压后：
 
-快速验证可填写 `build/data/sample-spider`、`dev`、`2` 和一个新的 CSV 路径。每题只生成并执行一次预测 SQL，再与本地标准 SQL 的结果比较；评测不调用结果分析 API。CSV 字段为：
-
-```text
-question,db_id,sql,executed,matched,error
+```powershell
+.\build\Release\text2sql.exe --db ".\data\spider\database\concert_singer\concert_singer.sqlite"
 ```
 
-已有输出文件不会覆盖。终端汇总实际尝试题数、执行成功率和本地结果一致率；比较口径见[技术文档](docs/design-and-implementation.md#7-手动-benchmark-与结果比较)。启动查询程序时不会自动运行评测。
+标准 SQL 用于本地人工核对，不放入模型问题。普通自然语言查询仍会请求结果分析。
 
 ## 数据、源码和许可证
 
-`data/college_2.sqlite` 是默认大学数据库，`data/company.sqlite` 和 `data/sample-spider/` 是小型回归样例，`data/spider.zip` 是完整运行包。来源与范围在[技术文档](docs/design-and-implementation.md#8-数据打包与来源)中统一说明，校验值见 [data/SHA256SUMS](data/SHA256SUMS)。
+`data/college_2.sqlite` 是默认大学数据库，`data/company.sqlite` 和 `data/sample-spider/` 是小型回归样例，`data/spider.zip` 是完整数据归档。所有仓库数据原样保留，来源与范围在[技术文档](docs/design-and-implementation.md#8-仓库数据与来源)中统一说明。原有 [data/SHA256SUMS](data/SHA256SUMS) 和 manifest 作为数据来源记录保留，构建和运行不执行这些校验。
 
 功能分别放在 `src/` 的多个 CPP 中，由 `main.cpp` 按顺序包含，CMake 只编译入口。代码使用普通函数、结构体、字符串、数组、循环和简单指针；资源释放与阅读顺序见[技术文档](docs/design-and-implementation.md#3-代码模块与基础-c-写法)。
 
-复制程序时同时复制旁边的 `data/`；安装时程序和数据会一并安装。构建文件、本地数据库和评测结果由 `.gitignore` 排除。
+复制程序时同时复制构建目录的 `data/`；Windows 的 `Release/` 程序也可与 `data/` 放在同一目录。项目不提供 CMake 安装目标。构建文件、本地数据库、手动解压的数据及本地配置由 `.gitignore` 排除。
 
 项目采用 [MIT 许可证](LICENSE)。SQLite 为公有领域，cJSON 使用 [MIT](third_party/cjson/LICENSE)，libcurl 使用 [curl license](https://curl.se/docs/copyright.html)。固定依赖来源及校验说明见[技术文档](docs/design-and-implementation.md#9-依赖跨平台与构建)。上游数据说明保留在 Spider 压缩包内。

@@ -119,23 +119,8 @@ bool json_is_object(cJSON *value) {
 bool json_is_array(cJSON *value) {
     return cJSON_IsArray(value);
 }
-cJSON *json_first_item(cJSON *array) {
-    if (array == nullptr) {
-        return nullptr;
-    }
-    return array->child;
-}
-cJSON *json_next_item(cJSON *item) {
-    if (item == nullptr) {
-        return nullptr;
-    }
-    return item->next;
-}
 cJSON *json_item(cJSON *array, int index) {
     return cJSON_GetArrayItem(array, index);
-}
-int json_size(cJSON *array) {
-    return cJSON_GetArraySize(array);
 }
 cJSON *json_array() {
     return cJSON_CreateArray();

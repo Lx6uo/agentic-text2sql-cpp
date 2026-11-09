@@ -56,6 +56,7 @@ Desktop.ini
 .vs/
 .cache/
 .clangd/
+/.screenshots/
 
 # Local configuration and credentials; keep example files
 config.json
@@ -66,11 +67,9 @@ config.*.local.json
 !.env.example
 !.env.*.example
 
-# Local datasets and generated benchmark results
+# Local datasets and retired evaluation output
 /data/*
-!/data/.gitkeep
-/results/*
-!/results/.gitkeep
+/results/
 
 # Local SQLite databases and their journal/WAL/SHM files
 *.sqlite

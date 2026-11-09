@@ -1,12 +1,12 @@
 # 项目设计与技术文档
 
-本文集中说明当前系统的设计、源码阅读方式、API 协议、数据库执行与手动评测。使用入口见 [README](../README.md)，任务背景、验证效果及汇报提纲见[汇报文档](project-report.md)。对应源码基准为 `5f8b04b`，整理日期为 2026-11-02。
+本文集中说明当前系统的设计、源码阅读方式、API 协议、数据库执行与文档评测记录。使用入口见 [README](../README.md)，任务背景、验证效果及汇报提纲见[汇报文档](project-report.md)。本文已同步 2026-11-09 的评测工具移除；历史验证的日期与版本在汇报文档中单独标注。
 
 ## 1. 目标与功能范围
 
 系统完成五个步骤：读取数据库上下文并填充提示词；请求模型生成 SQL；执行返回 SQL；请求模型分析执行结果；在 CLI 分别显示 SQL、结果和分析。
 
-查询流程由程序固定控制。有效问题只生成并执行一次 SQL，执行成功后再调用一次分析 API。SQL 失败直接返回错误，分析失败保留查询结果。用户可以继续输入独立问题，Benchmark 由独立命令手动运行。
+查询流程由程序固定控制。有效问题只生成并执行一次 SQL，执行成功后先显示 SQL 和数据，再调用一次分析 API。SQL 失败直接返回错误，分析失败保留查询结果。用户可以继续输入独立问题；项目不包含评测命令，评测结论直接记录在文档。
 
 默认数据库是 Spider 的 `college_2`。SQLite 文件、完整运行数据、JSON 配置示例与依赖源码随仓库提供，Windows/macOS/Linux 构建配置保留。程序采用基础 C++ 写法，通过普通返回值集中报告错误。
 
@@ -21,11 +21,14 @@ flowchart TD
     D -->|否| F[只读执行一次 SQL]
     F --> G{执行是否成功}
     G -->|否| H[CLI 显示 SQL 和统一错误]
-    G -->|是| I[API 请求二：分析有限结果预览]
-    I --> J[CLI 显示 SQL、结果及分析或分析错误]
+    G -->|是| I[CLI 显示 SQL 和查询结果]
+    I --> J[API 请求二：分析有限结果预览]
+    J --> K[CLI 显示分析或分析错误]
 ```
 
 `run_query` 开始时读取真实表、字段类型、非空约束、主键与外键。生成请求仅包含中文系统提示词、当前问题和数据库结构。标准答案 SQL 和结果行不会放进这次请求。
+
+`run_query` 只负责生成并执行 SQL，不包含分析开关或分析分支。CLI 显示查询结果后单独调用 `analyze_result`，因此分析请求始终在数据展示之后执行。
 
 第二次请求使用独立的分析提示词，上下文包含当前问题、已经执行的 SQL、列名、结果预览及截断标记。两次请求的提示词分别承担“生成 SQL”和“解释真实结果”的职责，避免分析阶段继续只返回 SQL。
 
@@ -70,13 +73,12 @@ FROM "instructor";
 | [database.cpp](../src/database.cpp) | 只读连接、结构读取、SQL 执行和结果数组 |
 | [llm.cpp](../src/llm.cpp) | libcurl HTTPS 请求、响应缓冲区和请求上下文 |
 | [json.cpp](../src/json.cpp) | cJSON 操作、字符串转义、请求生成及回复解析 |
-| [files.cpp](../src/files.cpp) | 文件、路径、数据集读取和 CSV 文件写入 |
-| [benchmark.cpp](../src/benchmark.cpp) | 手动评测、结果比较、CSV 记录和汇总 |
+| [files.cpp](../src/files.cpp) | 配置文件读取、路径拼接和默认数据路径解析 |
 | [cli.cpp](../src/cli.cpp) | 自然语言输入、引导、SQL/结果/分析的显示 |
 
 `main.cpp` 按依赖顺序包含各 CPP，CMake 只编译这个入口。项目没有自写头文件；第三方与系统头文件继续使用。其他功能 CPP 不应再单独加入同一个程序的编译列表，否则会重复定义。
 
-建议先读 `agent.cpp` 的 `run_query`，再看 `cli.cpp` 的输入输出、`database.cpp` 的执行与释放，最后阅读 JSON、HTTP 和 Benchmark 辅助模块。
+建议先读 `agent.cpp` 的 `run_query`，再看 `cli.cpp` 的输入输出、`database.cpp` 的执行与释放，最后阅读 JSON、HTTP 和文件辅助模块。
 
 自写代码使用普通函数、结构体、字符串、数组、判断、循环和简单指针。变量分别声明，控制语句使用大括号，多层访问拆成局部指针；不定义自写类、模板、Lambda 或异常流程，不使用智能指针、`vector/map/set`、`auto` 或引用参数。标准库内部实现及类型转换、平台条件编译继续保留。
 
@@ -88,7 +90,6 @@ FROM "instructor";
 | `QueryResult` | SQL、列、行数组、成功及截断状态 | `free_query(&result)` |
 | `QueryRun` | 查询结果、无效输入状态和独立分析结果 | `free_query(&run.query)` |
 | `Completion` | API 选项与本次 JSON 消息 | `close_completion(&source)` |
-| `DatasetResult` | 评测题目数组 | `delete[] dataset.items` |
 
 `&result` 表示取得结构体地址；函数用 `QueryResult *` 使用同一份数据，`result->row_count` 读取指针所指结构体的字段。行数组按本次行数上限一次分配，每行单元格按实际读取的数据分配，使用 `new (nothrow)` 与 `delete[]`。
 
@@ -142,37 +143,37 @@ SQL 长度、列数、表达式等受 SQLite limit 控制。默认 SQL 16 KiB、
 
 SQLite 结果保留整数、浮点数、文本、NULL 和 BLOB 类型；BLOB 显示为十六进制。终端为可读性裁剪长文本，分析预览有独立上限。
 
-错误文案集中在 `common.cpp` 的 `error_message`。各模块记录成功或失败，统一清理后返回类别提示；CLI 负责显示。保留 API、配置、文件、数据库、SQL、数据集、参数和取消等少量类别，不展开传输错误码或字段级诊断。分析状态与查询状态独立，分析错误不会抹掉 SQL 和查询结果。
+错误文案集中在 `common.cpp` 的 `error_message`。各模块记录成功或失败，统一清理后返回类别提示；CLI 负责显示。保留 API、配置、文件、数据库、SQL、参数和取消等少量类别，不展开传输错误码或字段级诊断。分析状态与查询状态独立，分析错误不会抹掉 SQL 和查询结果。
 
-## 7. 手动 Benchmark 与结果比较
+## 7. 文档评测记录
 
-评测由 `text2sql benchmark` 启动；每题读取对应数据库结构，请求并执行一次预测 SQL，然后在独立只读连接中执行标准 SQL。`run_query` 的 `with_analysis` 参数为 false，因此每题通常只有一次 API 请求。
+项目已移除 `benchmark.cpp`、评测命令、CSV 输出、数据集加载和自动结果比较。已有验证结果保存在[汇报文档第 4.4 节](project-report.md#44-功能验证与评价范围)，并注明历史记录与当前验证的区别。
 
-标准 SQL 只用于本地比较。为适配部分 Spider 原始 SQL，标准连接允许旧的双引号字符串写法，预测连接仍按严格标识符方式执行。评测最多读取 100000 行、16 MiB 结果。
+新增评测按以下步骤人工记录：
 
-比较规则如下：
+1. 选定问题和已有 SQLite 文件，用 `--db` 启动查询，记录模型生成的 SQL、实际数据和分析。
+2. 在本地数据库客户端以只读方式执行标准 SQL，核对返回列、每个值、重复行次数及排序；标准 SQL 不发送给模型。
+3. 整数按原值核对；浮点结果说明误差口径。遇到截断、标准 SQL 失败或无法核对时，记录“无法比较”及原因。
+4. 在汇报文档写明日期、源码版本、平台、模型、相关配置、问题、数据库、标准与预测 SQL、预期和实际结果、是否一致，以及分析文字是否忠实。
 
-- 列数和列位置必须对应，列别名不参与判断。
-- 标准 SQL 有外层 `ORDER BY` 时比较行顺序；否则用 `qsort` 排序行号后比较，保留重复行的次数，不复制整行字符串。
-- 整数和浮点数按数值比较，采用相对容差 `1e-9 × max(1, |x|, |y|)`；文本与数值属于不同类型，NULL 只与 NULL 相等。
-- 预测或标准结果截断、标准 SQL 失败等无法比较的情况，`matched` 留空并记录错误；预测执行失败时 `executed=0`、`matched` 留空，错误写入 `error`。
+原有两道中文题保存在 `data/sample-spider/dev.json`，可作为手工核对样例。大学库支持计数、分组、JOIN 和排名等验证。若记录多题比例，应同时写明尝试题数、执行成功数、可比较数和一致数；模型失败与无法比较都要保留，不能只汇总成功题。
 
-CSV 字段固定为 `question,db_id,sql,executed,matched,error`。文本中的逗号、双引号和换行正确引用；已有输出文件拒绝覆盖。API 或输出错误会停止评测，保留已写入内容。
+文档中的两题历史结果只说明当时样例流程可用，不能代表完整 Spider 准确率，也不能代替对当前版本重新查询的结果。当前没有完整 dev 集评测结论；单库实例上的结果一致不等于跨数据实例的 SQL 语义等价。
 
-执行成功率是执行成功题数除以实际尝试题数；结果一致率是匹配题数除以实际尝试题数。没有比较结论的题目也在已尝试分母中。该指标表示当前数据库实例上的本地结果一致性，不能替代 Spider 官方 Test Suite Accuracy。
-
-## 8. 数据打包与来源
+## 8. 仓库数据与来源
 
 | 仓库内容 | 用途 |
 |---|---|
 | [college_2.sqlite](../data/college_2.sqlite) | 默认大学数据库，11 张表、34620 条表记录合计，来自 Spider，原字节保留 |
 | [company.sqlite](../data/company.sqlite) | 3 个部门、6 名员工的小型样例 |
 | [sample-spider/dev.json](../data/sample-spider/dev.json) | 两道中文回归题及对应 company 数据库 |
-| [spider.zip](../data/spider.zip) | 206 个不重复数据库、题目、表元信息与标准 SQL |
+| [spider.zip](../data/spider.zip) | 原样保留的 206 个不重复数据库、题目、表元信息与标准 SQL，按需手动解压 |
 | [spider-manifest.json](../data/spider-manifest.json) | 运行包文件大小、SHA-256 与划分题数 |
 | [SHA256SUMS](../data/SHA256SUMS) | 直接随仓库提供的数据文件校验值 |
 
-`college_2.sqlite` 为 2117632 字节，与 ZIP 中原数据库的 SHA-256 一致。完整 ZIP 为约 57 MiB 的普通 Git 文件，CMake 根据归档校验值判断是否需要解压到构建目录的 `data/spider`，未变化时复用已解压数据；默认库另行复制到构建数据目录。
+`college_2.sqlite` 为 2117632 字节，历史数据整理时确认与 ZIP 中原数据库字节一致。完整 ZIP 为约 57 MiB 的普通 Git 文件，仍随 clone 提供。CMake 只复制现成的 college_2、company 和小型样例到构建数据目录，不读取 ZIP、不自动解压或校验，也不提供安装目标。
+
+默认启动不依赖 ZIP 的解压结果。其他 Spider 数据库需要用户手动解压，并通过 `--db` 指向其中具体的 `.sqlite` 文件；Windows 可以使用资源管理器“全部提取”。原 SHA256SUMS 与 manifest 仅作为历史数据清单保留，程序不执行归档校验。
 
 | 运行包划分 | 题数 | 数据库数 |
 |---|---:|---:|
@@ -193,8 +194,8 @@ CSV 字段固定为 `question,db_id,sql,executed,matched,error`。文本中的�
 
 第三方源码校验值在 [third_party/SHA256SUMS](../third_party/SHA256SUMS)。CMake 不在线下载 SQLite 或 cJSON；开发环境需要事先安装 libcurl 和编译工具。
 
-Windows 将原生 UTF-16 命令行转换为 UTF-8，并设置 UTF-8 控制台。业务路径用普通字符串，文件系统接口集中在 `files.cpp`，SQLite 接收 UTF-8 路径。CMake 保留 MSVC、Shell32、vcpkg 静态 curl 与静态运行库设置；入口兼容多配置构建目录和安装布局。
+Windows 将原生 UTF-16 命令行转换为 UTF-8，并设置 UTF-8 控制台。业务路径用普通字符串，文件系统接口集中在 `files.cpp`，SQLite 接收 UTF-8 路径。CMake 保留 MSVC、Shell32、vcpkg 静态 curl 与静态运行库设置；入口兼容多配置构建目录和程序旁边的 data 目录。
 
 [CI 配置](../.github/workflows/ci.yml) 定义 Linux、macOS 和 Windows 的编译及启动帮助检查。当前实际验证记录来自 macOS；三平台配置的存在与本版本的跨平台运行结果应分别理解。
 
-源码外构建可启用 `TEXT2SQL_SANITIZERS=ON` 辅助检查内存和未定义行为。项目不保留测试目录，历史开发检查在临时目录中进行。构建、安装、数据目录和评测结果的使用方式统一见 [README](../README.md)。
+源码外构建可启用 `TEXT2SQL_SANITIZERS=ON` 辅助检查内存和未定义行为。项目不保留测试目录，开发检查在临时目录中进行。构建、数据目录和文档评测记录的使用方式统一见 [README](../README.md)。
