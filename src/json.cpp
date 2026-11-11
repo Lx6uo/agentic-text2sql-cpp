@@ -1,12 +1,6 @@
 // JSON 库调用集中在这里。其他模块使用简单的读取函数和结果结构体。
 bool is_utf8_tail(unsigned char value) {
-    if (value < 128) {
-        return false;
-    }
-    if (value > 191) {
-        return false;
-    }
-    return true;
+    return value >= 128 && value <= 191;
 }
 // 转义引号和控制字符，替换非法 UTF-8，生成合法 JSON 字符串。
 string json_quote(string text) {
@@ -122,9 +116,6 @@ bool json_is_array(cJSON *value) {
 cJSON *json_item(cJSON *array, int index) {
     return cJSON_GetArrayItem(array, index);
 }
-cJSON *json_array() {
-    return cJSON_CreateArray();
-}
 // 字段必须存在且为字符串，否则返回失败状态。
 TextResult read_json_string(cJSON *object, const char *name) {
     cJSON *value = json_field(object, name);
@@ -136,125 +127,13 @@ TextResult read_json_string(cJSON *object, const char *name) {
     result.text = value->valuestring;
     return result;
 }
-// 读取有限数值，拒绝非数字以及 NaN、无穷大。
-NumberResult read_json_number(cJSON *object, const char *name) {
-    NumberResult result;
-    cJSON *value = json_field(object, name);
-    if (cJSON_IsNumber(value) == false) {
-        result.error = error_message("JSON");
-        return result;
-    }
-    if (isfinite(value->valuedouble) == false) {
-        result.error = error_message("JSON");
-        return result;
-    }
-    result.success = true;
-    result.number = value->valuedouble;
-    return result;
-}
-cJSON *json_string(string value) {
-    // 字符串已转义，使用 Raw 避免重复转义。
-    return cJSON_CreateRaw(json_quote(value).c_str());
-}
-// 添加成功后由父对象管理 value；失败时在这里释放。
-bool json_set(cJSON *object, const char *key, cJSON *value) {
-    if (object == nullptr) {
-        free_json(value);
-        return false;
-    }
-    if (value == nullptr) {
-        return false;
-    }
-    if (cJSON_AddItemToObject(object, key, value) == false) {
-        free_json(value);
-        return false;
-    }
-    return true;
-}
-// 数组接管元素所有权，添加失败时由这里释放元素。
-bool json_add(cJSON *array, cJSON *value) {
-    if (array == nullptr) {
-        free_json(value);
-        return false;
-    }
-    if (value == nullptr) {
-        return false;
-    }
-    if (cJSON_AddItemToArray(array, value) == false) {
-        free_json(value);
-        return false;
-    }
-    return true;
-}
-// 将 JSON 对象转成普通字符串，同时释放传入对象。
-TextResult json_text(cJSON *value) {
-    if (value == nullptr) {
-        return failed_text("JSON");
-    }
-    char *text = cJSON_PrintUnformatted(value);
-    free_json(value);
-    if (text == nullptr) {
-        return failed_text("JSON");
-    }
-    TextResult result;
-    result.success = true;
-    result.text = text;
-    cJSON_free(text);
-    return result;
-}
-// 按 Chat Completions 格式追加一条角色消息。
-Status append_json_message(cJSON *messages, string role, string text) {
-    cJSON *message = cJSON_CreateObject();
-    bool valid = true;
-    if (json_set(message, "role", json_string(role)) == false) {
-        valid = false;
-    }
-    if (json_set(message, "content", json_string(text)) == false) {
-        valid = false;
-    }
-    if (valid == false) {
-        free_json(message);
-        return failed_status("JSON");
-    }
-    if (json_add(messages, message) == false) {
-        return failed_status("JSON");
-    }
-    return ok_status();
-}
-// 生成非流式请求体，将消息数组复制到独立 JSON 对象。
-TextResult model_request_json(Completion *source) {
-    ApiOptions *api = &source->api;
-    cJSON *body = cJSON_CreateObject();
-    bool valid = true;
-    if (json_set(body, "model", json_string(api->model)) == false) {
-        valid = false;
-    }
-    // 复制上下文，避免销毁请求体时释放 source 的消息。
-    if (json_set(body, "messages", cJSON_Duplicate(source->messages, true)) == false) {
-        valid = false;
-    }
-    if (json_set(body, "stream", cJSON_CreateBool(false)) == false) {
-        valid = false;
-    }
-    if (json_set(body, "temperature", cJSON_CreateNumber(0)) == false) {
-        valid = false;
-    }
-    if (json_set(body, "max_tokens", cJSON_CreateNumber(api->max_tokens)) == false) {
-        valid = false;
-    }
-    // 显式关闭思考输出，回复用于直接执行 SQL 或显示分析。
-    cJSON *thinking = cJSON_CreateObject();
-    if (json_set(thinking, "type", json_string("disabled")) == false) {
-        valid = false;
-    }
-    if (json_set(body, "thinking", thinking) == false) {
-        valid = false;
-    }
-    if (valid == false) {
-        free_json(body);
-        return failed_text("JSON");
-    }
-    return json_text(body);
+// 请求格式固定，只对模型名和两条消息的内容做 JSON 转义。
+string model_request_json(ApiOptions *api, string system, string input) {
+    return "{\"model\":" + json_quote(api->model) +
+           ",\"messages\":[{\"role\":\"system\",\"content\":" + json_quote(system) +
+           "},{\"role\":\"user\",\"content\":" + json_quote(input) +
+           "}],\"stream\":false,\"temperature\":0,\"max_tokens\":" +
+           to_string(model_output_tokens) + ",\"thinking\":{\"type\":\"disabled\"}}";
 }
 // 提取第一条 assistant 回复，校验角色、内容和结束状态。
 TextResult read_model_response(string text) {
@@ -274,42 +153,66 @@ TextResult read_model_response(string text) {
     if (json_has_field(choice, "finish_reason")) {
         // 中断的回复可能只有半条 SQL，不能执行。
         TextResult finish = read_json_string(choice, "finish_reason");
+        if (valid && finish.success && finish.text == "length") {
+            free_json(object);
+            TextResult limited;
+            limited.error = "模型回复达到长度上限。";
+            return limited;
+        }
         if (finish.success == false || finish.text != "stop") {
             valid = false;
         }
     }
     free_json(object);
     if (valid == false) {
-        return failed_text("JSON");
+        return failed_text("API");
     }
     content.text = trim(content.text);
     return content;
 }
-// 统一显示 SQLite 类型，BLOB 使用十六进制表示。
-string cell_text(Cell *cell) {
-    if (cell->type == SQLITE_NULL) {
-        return "NULL";
+// 只在读取结果时裁剪，标记也计入字节上限。
+string limit_text(string text, int max_bytes, bool *truncated) {
+    if ((int)text.length() <= max_bytes) {
+        return text;
     }
-    if (cell->type == SQLITE_INTEGER) {
-        return to_string(cell->integer);
+    string marker = "[截断]";
+    int end = max_bytes - (int)marker.length();
+    while (end > 0 && is_utf8_tail((unsigned char)text[end])) {
+        end--;
     }
-    if (cell->type == SQLITE_TEXT) {
-        return cell->text;
-    }
-    if (cell->type == SQLITE_BLOB) {
-        return "0x" + cell->text;
-    }
-    char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%.17g", cell->real);
-    return buffer;
+    *truncated = true;
+    return text.substr(0, end) + marker;
 }
-// 估算结果容量，文本按 JSON 转义后的长度计算。
-int cell_bytes(Cell *cell) {
-    if (cell->type == SQLITE_TEXT) {
-        return (int)json_quote(cell->text).length();
+string columns_json(QueryResult *query) {
+    string text = "[";
+    for (int c = 0; c < query->column_count; c++) {
+        if (c > 0) {
+            text += ",";
+        }
+        text += json_quote(query->columns[c]);
     }
-    if (cell->type == SQLITE_BLOB) {
-        return (int)cell->text.length() + 15;
+    return text + "]";
+}
+string row_json(Cell *cells, int column_count) {
+    string text = "[";
+    for (int c = 0; c < column_count; c++) {
+        if (c > 0) {
+            text += ",";
+        }
+        text += cells[c].is_null ? "null" : json_quote(cells[c].text);
     }
-    return (int)cell_text(cell).length();
+    return text + "]";
+}
+// 不再筛选或裁剪，完整打包终端显示的同一份结果。
+string result_json(QueryResult *query) {
+    string text = "{\"row_count\":" + to_string(query->row_count) +
+                  ",\"complete\":" + (query->truncated ? "false" : "true") +
+                  ",\"columns\":" + columns_json(query) + ",\"rows\":[";
+    for (int r = 0; r < query->row_count; r++) {
+        if (r > 0) {
+            text += ",";
+        }
+        text += row_json(query->cells + r * query->column_count, query->column_count);
+    }
+    return text + "]}";
 }

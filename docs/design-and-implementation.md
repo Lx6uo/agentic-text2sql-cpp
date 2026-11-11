@@ -1,6 +1,6 @@
 # 项目设计与技术文档
 
-本文集中说明当前系统的设计、源码阅读方式、API 协议、数据库执行与文档评测记录。使用入口见 [README](../README.md)，任务背景、验证效果及汇报提纲见[汇报文档](project-report.md)。本文已同步 2026-11-09 的评测工具移除；历史验证的日期与版本在汇报文档中单独标注。
+本文集中说明当前系统的设计、源码阅读方式、API 协议、数据库执行与文档评测记录。使用入口见 [README](../README.md)，任务背景、验证效果及汇报提纲见[汇报文档](project-report.md)。本文已同步 2026-11-11 的请求构建、HTTP 响应与查询状态精简；历史验证的日期与版本在汇报文档中单独标注。
 
 ## 1. 目标与功能范围
 
@@ -22,7 +22,7 @@ flowchart TD
     F --> G{执行是否成功}
     G -->|否| H[CLI 显示 SQL 和统一错误]
     G -->|是| I[CLI 显示 SQL 和查询结果]
-    I --> J[API 请求二：分析有限结果预览]
+    I --> J[API 请求二：分析同一份查询结果]
     J --> K[CLI 显示分析或分析错误]
 ```
 
@@ -30,7 +30,7 @@ flowchart TD
 
 `run_query` 只负责生成并执行 SQL，不包含分析开关或分析分支。CLI 显示查询结果后单独调用 `analyze_result`，因此分析请求始终在数据展示之后执行。
 
-第二次请求使用独立的分析提示词，上下文包含当前问题、已经执行的 SQL、列名、结果预览及截断标记。两次请求的提示词分别承担“生成 SQL”和“解释真实结果”的职责，避免分析阶段继续只返回 SQL。
+第二次请求使用独立的分析提示词，上下文包含当前问题、已经执行的 SQL、列名、同一份查询结果及完整性标记。两次请求的提示词分别承担“生成 SQL”和“解释真实结果”的职责，避免分析阶段继续只返回 SQL。
 
 每次提问重新建立模型上下文。会话复用数据库连接，但不保留上一题的消息、SQL 或结果作为下一题上下文；涉及“继续筛选”等追问时，应在新问题中写明完整条件。
 
@@ -60,7 +60,7 @@ SELECT 'instructor',
 FROM "instructor";
 ```
 
-单表或关联查询仍按问题要求返回普通列。显示行数和大小上限适用于整条 SQL，跨表查询不会为每张表单独分配显示额度；默认 100 行可能只覆盖整个结果的一部分。
+单表或关联查询仍按问题要求返回普通列。显示行数和大小上限适用于整条 SQL，跨表查询不会为每张表单独分配显示额度；统一最多 2000 行、1 MiB，超过任一上限时标记截断。
 
 ## 3. 代码模块与基础 C++ 写法
 
@@ -71,7 +71,7 @@ FROM "instructor";
 | [config.cpp](../src/config.cpp) | JSON 配置字段、默认值与环境变量 |
 | [agent.cpp](../src/agent.cpp) | 系统提示词、标记识别、查询流程与结果分析 |
 | [database.cpp](../src/database.cpp) | 只读连接、结构读取、SQL 执行和结果数组 |
-| [llm.cpp](../src/llm.cpp) | libcurl HTTPS 请求、响应缓冲区和请求上下文 |
+| [llm.cpp](../src/llm.cpp) | 一次模型调用、libcurl HTTPS 请求和响应字符串 |
 | [json.cpp](../src/json.cpp) | cJSON 操作、字符串转义、请求生成及回复解析 |
 | [files.cpp](../src/files.cpp) | 配置文件读取、路径拼接和默认数据路径解析 |
 | [cli.cpp](../src/cli.cpp) | 自然语言输入、引导、SQL/结果/分析的显示 |
@@ -86,62 +86,73 @@ FROM "instructor";
 
 | 数据 | 内容 | 使用后如何清理 |
 |---|---|---|
-| `Database` | SQLite 连接和执行选项 | `close_database(&db)` |
-| `QueryResult` | SQL、列、行数组、成功及截断状态 | `free_query(&result)` |
-| `QueryRun` | 查询结果、无效输入状态和独立分析结果 | `free_query(&run.query)` |
-| `Completion` | API 选项与本次 JSON 消息 | `close_completion(&source)` |
+| `Database` | SQLite 连接、内部查询和执行状态 | `close_database(&db)` |
+| `QueryResult` | SQL、列、整块单元格数组、成功及截断状态 | `free_query(&result)` |
+| `QueryRun` | 查询结果和无效输入状态，成功与错误由 `query` 保存 | `free_query(&run.query)` |
 
-`&result` 表示取得结构体地址；函数用 `QueryResult *` 使用同一份数据，`result->row_count` 读取指针所指结构体的字段。行数组按本次行数上限一次分配，每行单元格按实际读取的数据分配，使用 `new (nothrow)` 与 `delete[]`。
+`&result` 表示取得结构体地址；函数用 `QueryResult *` 使用同一份数据，`result->row_count` 读取指针所指结构体的字段。单元格数组按行数上限乘实际列数一次分配，通过 `cells[r * column_count + c]` 访问，使用 `new (nothrow)` 与一次 `delete[]`。数据库只在启动时直接打开，不保留连接替换流程。
 
 ```cpp
 QueryResult result = execute_sql(&db, "SELECT COUNT(*) FROM student");
 if (result.success) {
-    QueryRow *row = &result.rows[0];
-    Cell *cell = &row->cells[0];
-    cout << cell_text(cell);
+    Cell *cell = &result.cells[0];
+    cout << (cell->is_null ? "NULL" : cell->text);
 }
 free_query(&result);
 ```
 
-上例是已有数据库连接中的代码节选。结果数组的释放责任交给调用方；不要把拥有数组的结构体复制到两个位置并分别释放。`free_query` 先释放各行单元格，再释放行数组。`execute_sql` 失败时会清除不完整结果并释放 SQLite statement；调用方仍可统一调用 `free_query`。
+上例是已有数据库连接中的代码节选。结果数组的释放责任交给调用方；不要把拥有数组的结构体复制到两个位置并分别释放。`free_query` 一次释放整块单元格数组。`execute_sql` 失败时会清除不完整结果并释放 SQLite statement；调用方仍可统一调用 `free_query`。
 
-cJSON 子对象添加成功后由父对象管理，添加失败由辅助函数释放。请求完成后释放上下文；libcurl 的缓冲区、请求头和连接在同一出口清理。
+模型请求用 `json_quote` 转义字符串后直接拼接固定 JSON，不创建 cJSON 消息对象。cJSON 只负责解析配置与模型回复，解析完成后释放根对象。HTTP 响应用 `string` 累积，请求头和连接在同一出口清理。分析结果是 CLI 中独立的 `TextResult` 局部变量，查询成功状态和错误只保存在 `QueryRun.query` 中。
 
 ## 5. JSON 配置与 API 请求
 
-配置包含 `api` 和 `database` 两部分，缺省字段使用结构体默认值。字段只做基本类型与数值范围检查，失败统一返回配置提示。
+配置只保留四个字符串字段，缺省字段使用结构体默认值，在文件读取边界检查字段类型。旧配置中的数字字段会被忽略，不再覆盖固定运行上限。
+
+四个字段通过分区名、字段名和目标字符串指针数组按位置对应，循环读取；缺省、类型检查、配置相对路径和环境变量优先级保持一致。
 
 | 字段 | 默认值 | 作用 |
 |---|---|---|
 | `api.base_url` | `https://api.deepseek.com` | 请求服务地址，程序追加 `/chat/completions` |
 | `api.model` | `deepseek-flash` | 模型名称 |
 | `api.api_key` | 空 | 使用者自己的密钥 |
-| `api.timeout_seconds` | 45 | 请求总超时，范围 1–600 秒 |
-| `api.max_tokens` | 2048 | 回复 token 上限，范围 1–32768 |
 | `database.path` | 示例为 `data/college_2.sqlite` | 显式数据库路径；省略时自动定位内置大学库 |
-| `database.timeout_ms` | 5000 | SQL 截止时间与忙等待时间 |
-| `database.max_display_rows` | 100 | 查询读取行数上限 |
-| `database.max_preview_rows` | 100 | 分析请求的行数上限，范围 1–100 |
-| `database.max_sql_bytes` | 16384 | SQL 字节数上限 |
-| `database.max_result_bytes` | 1048576 | 读取结果内容的估算字节上限 |
+
+运行上限固定在 `common.cpp`，终端和分析共用查询范围：
+
+| 项目 | 固定上限 |
+|---|---:|
+| 普通查询结果 | 2000 行、128 列 |
+| 结构化结果总量 | 1 MiB，包括 JSON 转义、列名和元数据预留 |
+| 单值 / 列名 | 8 KiB / 256 字节，包括截断标记 |
+| SQL 长度 / 执行超时 | 16 KiB / 5 秒 |
+| 模型回复 | 8192 tokens |
+| HTTP 请求体 / 请求总超时 | 4 MiB / 120 秒 |
+| 解压后 HTTP 响应 | 2 MiB |
 
 数据库路径优先使用 `--db`，再使用配置，最后自动查找程序附带数据。配置相对路径以配置文件所在目录为基准。`DEEPSEEK_API_KEY` 覆盖文件中的密钥，空环境变量也会覆盖。
 
-`model_request_json` 生成 Chat Completions 请求，消息数组包含 system 和 user；两个阶段分别建立消息。请求同时设置 `stream=false`、`temperature=0`、`max_tokens` 和 `thinking.type=disabled`。密钥放在内存中的 `Authorization: Bearer …` 请求头，回复读取第一条 assistant 的 content。
+`ask_model(api, system, input)` 完成一次模型请求，`model_request_json` 直接构造 Chat Completions 请求的 system 和 user 消息；两个阶段分别调用，不保存持久上下文。请求同时设置 `stream=false`、`temperature=0`、`max_tokens` 和 `thinking.type=disabled`。密钥放在内存中的 `Authorization: Bearer …` 请求头，回复读取第一条 assistant 的 content。
 
-HTTPS 由进程内的 libcurl 发送，校验证书与主机名，不跟随重定向，忽略 netrc。连接超时为 10 秒，总超时由配置指定；解压后的响应最多 2 MiB，请求 JSON 最多 512 KiB，支持取消回调。URL、模型名等不再做逐项业务预校验，请求和回复失败统一报告 API 错误。
+HTTPS 由进程内的 libcurl 发送，校验证书与主机名，不跟随重定向，忽略 netrc。连接超时为 10 秒，总超时固定为 120 秒；解压后的响应最多 2 MiB，请求 JSON 最多 4 MiB，支持取消回调。URL、模型名等不再做逐项业务预校验，请求和回复失败统一报告 API 错误。
 
-分析数据默认最多 100 行、128 KiB，列名最多 128 字节、单值最多 2048 字节，长文本按 UTF-8 字符边界裁剪。数据用 JSON 的列名数组和行数组按位置对应，保留重名列及数值、文本、NULL 的区别；元数据说明本地读取行数、实际发送行数和完整性。原查询截断、行数受限或长值被裁剪时，模型会注明限制；完整结果可直接汇总。详情类问题按主体归并重复信息并列出必要明细，区分不同课程数量与选课记录数量，不把 `LIMIT 1` 选出的对象视为唯一第一。
+查询数据在数据库读取处裁剪一次，终端和 `result_json` 使用同一份列名、行和单元格。行数达到 2000 或总容量达到 1 MiB 时按整行停止；单值和列名按 UTF-8 字符边界裁剪，统一设置 `truncated`。分析阶段不再选择前若干行或二次裁剪。
+
+结果 JSON 使用 `columns` 与行数组按位置对应，保留重名列；`row_count` 表示实际提供行数，`complete` 说明结果是否完整。单元格只保存 `is_null` 和 `text`：整数、浮点数和 BLOB 在读取处转换为文本，沿用现有数字格式和 BLOB 十六进制显示；数据库 NULL 编码为 JSON null，与空字符串和文本 "NULL" 区分。模型收到的数字也是字符串，提示词明确要求按文本内容理解，结果不再保留 NULL 以外的原始 SQLite 类型。
+
+详情类问题按主体归并重复信息并列出必要明细，区分不同课程数量与选课记录数量，不把 `LIMIT 1` 选出的对象视为唯一第一。模型返回 `finish_reason=length` 时不把半截 SQL 当作完整语句；分析阶段明确显示“分析输出达到上限”，保留已显示的数据。结果容量与模型上下文、输出上限是不同约束，8192 tokens 不保证能逐行复述全部 2000 行。
 
 ## 6. SQLite 执行与集中错误处理
 
 用户数据库通过 `SQLITE_OPEN_READONLY` 打开。执行层保留 `query_only`、defensive、`trusted_schema=OFF`、authorizer、语句只读检查和函数白名单；编译时关闭扩展加载。写操作、DDL、ATTACH、事务和模型 PRAGMA 被拒绝，合法 JOIN、CTE、聚合与窗口函数可以使用。
 
+授权回调用 `sqlite3_stricmp` 比较函数名，继续忽略大小写；SELECT、READ 和 RECURSIVE 使用同一放行判断，函数白名单内容不变。普通空白仅包含空格、制表符、回车和换行，UTF-8 续字节范围仍为 128–191。
+
 内部结构读取使用固定查询与转义后的真实表名，临时允许所需的内部操作，然后恢复授权检查。模型 SQL 只允许一条；剩余文本若能准备出第二条 statement，会被拒绝。
 
-SQL 长度、列数、表达式等受 SQLite limit 控制。默认 SQL 16 KiB、最多 128 列、单值最多 1 MiB；执行与逐行读取同时检查截止时间和取消状态。达到行数或结果内容上限时保留已读取数据并标记截断，执行错误时清除不完整行。
+SQL 长度、列数、表达式等受 SQLite limit 控制。SQL 16 KiB、最多 128 列，SQLite 原始单值限制仍为 1 MiB；执行与逐行读取同时检查截止时间和取消状态。达到行数或结果内容上限时保留已读取数据并标记截断，执行错误时清除不完整行。
 
-SQLite 结果保留整数、浮点数、文本、NULL 和 BLOB 类型；BLOB 显示为十六进制。终端为可读性裁剪长文本，分析预览有独立上限。
+内部表结构查询继续采用现有 table_xinfo、foreign_key_list 方式，最多 10000 行、1 MiB，不套用普通结果的单值和列名裁剪。结构信息必须完整，发生容量截断就返回错误。整块单元格数组减少逐行分配与释放，内存按行数上限预留，因此实际结果很少时仍占用预留空间。
 
 错误文案集中在 `common.cpp` 的 `error_message`。各模块记录成功或失败，统一清理后返回类别提示；CLI 负责显示。保留 API、配置、文件、数据库、SQL、参数和取消等少量类别，不展开传输错误码或字段级诊断。分析状态与查询状态独立，分析错误不会抹掉 SQL 和查询结果。
 

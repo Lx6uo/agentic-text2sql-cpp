@@ -15,20 +15,14 @@ Args parse_arguments(int argc, char **argv) {
         if (value == "--help" || value == "-h") {
             args.help = true;
         } else if (value == "--db") {
-            if (args.db_given) {
-                return args;
-            }
-            if (i + 1 == argc) {
+            if (args.db_given || i + 1 == argc) {
                 return args;
             }
             i++;
             args.db = argv[i];
             args.db_given = true;
         } else if (value == "--config") {
-            if (args.config_required) {
-                return args;
-            }
-            if (i + 1 == argc) {
+            if (args.config_required || i + 1 == argc) {
                 return args;
             }
             i++;
@@ -60,7 +54,7 @@ string ask_path(string label) {
     }
     return path;
 }
-// 清理控制字符并缩短单元格文本，保持终端输出可读。
+// 只清理终端控制字符，长度已在读取结果时统一处理。
 string display_text(string text) {
     for (int i = 0; i < (int)text.length(); i++) {
         unsigned char c = text[i];
@@ -71,17 +65,6 @@ string display_text(string text) {
             text[i] = ' ';
         }
     }
-    if (text.length() > 160) {
-        int end = 160;
-        // 回退到 UTF-8 字符边界，避免截断中文字符。
-        while (end > 0) {
-            if (is_utf8_tail((unsigned char)text[end]) == false) {
-                break;
-            }
-            end--;
-        }
-        text = text.substr(0, end) + "...";
-    }
     return text;
 }
 void print_table(QueryResult *result) {
@@ -90,10 +73,10 @@ void print_table(QueryResult *result) {
     }
     cout << '\n';
     for (int r = 0; r < result->row_count; r++) {
-        QueryRow *row = &result->rows[r];
+        Cell *row = result->cells + r * result->column_count;
         for (int c = 0; c < result->column_count; c++) {
-            Cell *cell = &row->cells[c];
-            cout << display_text(cell_text(cell)) << "  ";
+            Cell *cell = &row[c];
+            cout << display_text(cell->is_null ? "NULL" : cell->text) << "  ";
         }
         cout << '\n';
     }
@@ -125,31 +108,28 @@ void print_result(QueryRun *result) {
     }
     QueryResult *query = &result->query;
     if (query->sql.empty()) {
-        print_error(result->error);
+        print_error(query->error);
         return;
     }
     cout << "\nSQL 语句\n--------------------------------\n" << query->sql << '\n';
     cout << "\n查询结果\n--------------------------------\n";
-    if (result->success) {
+    if (query->success) {
         print_table(query);
     } else {
         cout << flush;
-        print_error(result->error);
+        print_error(query->error);
     }
     cout << "--------------------------------\n";
 }
 // 分析失败时只显示分析提示，不重复打印已有查询结果。
-void print_analysis_result(QueryRun *result) {
-    if (result->success) {
-        TextResult *analysis = &result->analysis;
-        cout << "\n分析结果\n--------------------------------\n";
-        if (analysis->success) {
-            print_analysis_text(analysis->text);
-        } else {
-            cout << "分析暂不可用：" << analysis->error << '\n';
-        }
-        cout << "--------------------------------\n";
+void print_analysis_result(TextResult *analysis) {
+    cout << "\n分析结果\n--------------------------------\n";
+    if (analysis->success) {
+        print_analysis_text(analysis->text);
+    } else {
+        cout << "分析暂不可用：" << analysis->error << '\n';
     }
+    cout << "--------------------------------\n";
 }
 void print_guide(string table) {
     cout << "直接输入问题并按回车，每次查询后可以继续提问。\n";
@@ -170,7 +150,7 @@ int run_chat(Config *config, string path) {
     }
     // 连接数据库，并选取一个表名作为提问示例。
     Database db;
-    Status opened = open_database(&db, path, config->database);
+    Status opened = open_database(&db, path);
     if (!opened.success) {
         print_error(opened.error);
         return 1;
@@ -179,9 +159,7 @@ int run_chat(Config *config, string path) {
     string example;
     if (tables.success) {
         if (tables.row_count > 0) {
-            QueryRow *row = &tables.rows[0];
-            Cell *table = &row->cells[0];
-            example = table->text;
+            example = tables.cells[0].text;
         }
     }
     free_query(&tables);
@@ -214,17 +192,18 @@ int run_chat(Config *config, string path) {
             print_error("请先配置 AI 密钥");
             continue;
         }
+        if (question.length() > 16384) {
+            print_error(error_message("输入"));
+            continue;
+        }
         cout << "正在处理…\n";
         // 每个问题使用独立上下文，先显示查询结果再分析。
-        Completion source;
-        source.api = config->api;
-        QueryRun result = run_query(&db, question, &source);
+        QueryRun result = run_query(&db, question, api);
         print_result(&result);
-        if (result.success && !cancelled) {
+        if (result.query.success && !cancelled) {
             cout << "\n正在分析…\n" << flush;
-            result.analysis = analyze_result(question, &result.query, &source,
-                                             config->database.max_preview_rows);
-            print_analysis_result(&result);
+            TextResult analysis = analyze_result(question, &result.query, api);
+            print_analysis_result(&analysis);
         }
         free_query(&result.query);
         cout << '\n';

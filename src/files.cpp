@@ -6,10 +6,7 @@ string join_path(string folder, string name) {
         return name;
     }
     char last = folder.back();
-    if (last == '/') {
-        return folder + name;
-    }
-    if (last == '\\') {
+    if (last == '/' || last == '\\') {
         return folder + name;
     }
     return folder + "/" + name;

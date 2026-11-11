@@ -79,19 +79,19 @@ flowchart LR
     B --> C[第一次 API：生成 SQL]
     C --> D[SQLite 只读执行]
     D --> E[CLI 显示 SQL 和数据]
-    E --> F[第二次 API：分析结果预览]
+    E --> F[第二次 API：分析同一份查询结果]
     F --> G[CLI 显示分析文字]
 ```
 
 每个有效问题只生成并执行一次 SQL，成功后先显示查询结果，再请求一次结果分析。SQL 执行失败返回统一错误；分析失败仍保留已经显示的 SQL 和数据。项目不包含自动评测命令。
 
-两次请求分别建立上下文：生成阶段使用当前问题和真实表结构；分析阶段使用当前问题、已执行 SQL 和有限结果预览。每个新问题重新建立消息，数据库连接在会话内复用；涉及连续筛选时，使用者需要在新问题中补全条件。
+两次请求分别建立上下文：生成阶段使用当前问题和真实表结构；分析阶段使用当前问题、已执行 SQL 和同一份查询结果。每个新问题重新建立消息，数据库连接在会话内复用；涉及连续筛选时，使用者需要在新问题中补全条件。
 
 ### 2.3 输入、执行与展示边界
 
 SQL 系统提示词约定无查询意图的输入返回固定标记，程序识别后显示引导；`/help` 和 `/exit` 由 CLI 本地处理。分别查看不同表的原始记录时，模型统一返回“表名 + JSON 记录”，保留各表字段和值，满足一条 SQL 的列数要求。
 
-SQLite 执行层使用只读授权与资源上限，合法 JOIN、聚合、CTE 和窗口函数仍可执行。默认 SQL 超时为 5000 ms，本地读取最多 100 行、约 1 MiB 结果；分析默认接收最多 100 行、128 KiB 的结构化数据并标记截断。错误按少量类别集中处理，结果中保留成功、失败和截断状态，便于用户核对。
+SQLite 执行层使用只读授权与资源上限，合法 JOIN、聚合、CTE 和窗口函数仍可执行。SQL 超时固定为 5000 ms，终端和分析共用最多 2000 行、128 列、1 MiB 的结构化结果，单值最多 8 KiB、列名最多 256 字节，统一标记截断。模型回复上限为 8192 tokens，HTTP 请求总超时为 120 秒。错误按少量类别集中处理，结果中保留成功、失败和截断状态，便于用户核对。
 
 ## 3. 实现方法
 
@@ -103,60 +103,58 @@ SQLite 执行层使用只读授权与资源上限，合法 JOIN、聚合、CTE �
 |---|---|
 | C++17 | 普通函数、结构体、数组、指针与 CLI 主流程 |
 | SQLite | 读取真实结构、执行只读 SQL、取得结果 |
-| cJSON | 读取配置，生成 API 请求并解析回复 |
+| cJSON | 读取配置和解析模型回复；请求 JSON 由程序直接拼接 |
 | libcurl | 在进程内发送 HTTPS 请求，接收模型返回 |
 
 `agent.cpp` 控制查询与分析，`database.cpp` 集中 SQLite 调用，`llm.cpp` 与 `json.cpp` 完成 API 协议，`files.cpp` 读取配置和处理路径，`cli.cpp` 展示输出。模块和资源释放的完整说明见[技术文档](design-and-implementation.md)。
 
 ### 3.2 重点代码：查询主流程
 
-以下节选来自当前源码。生成 SQL 的主流程省略了三处失败返回分支；CLI 片段展示查询结果先于分析输出的调用顺序。函数内部片段依赖所在函数的变量，完整实现可通过各节的源码链接阅读。
+以下节选来自当前源码。生成 SQL 的主流程省略了两处失败返回分支；CLI 片段展示查询结果先于分析输出的调用顺序。函数内部片段依赖所在函数的变量，完整实现可通过各节的源码链接阅读。
 
 来源：[src/agent.cpp：run_query](../src/agent.cpp)。
 
 ```cpp
 TextResult schema = read_schema(db);
 // ... 省略结构读取失败的返回分支
-Status setup = start_completion(source, system_prompt,
-                                "问题：" + question + "\n数据库结构：\n" + schema.text);
-// ... 省略上下文构建失败的返回分支
-TextResult reply = request_text(source);
-close_completion(source);
+TextResult reply = ask_model(api, system_prompt,
+                             "问题：" + question + "\n数据库结构：\n" + schema.text);
 // ... 省略请求失败的返回分支
-result = execute_reply(db, reply.text);
+return execute_reply(db, reply.text);
 ```
 
 CLI 中的显示与分析顺序，来源：[src/cli.cpp：run_chat](../src/cli.cpp)：
 
 ```cpp
-QueryRun result = run_query(&db, question, &source);
+QueryRun result = run_query(&db, question, api);
 print_result(&result);
-if (result.success && !cancelled) {
+if (result.query.success && !cancelled) {
     cout << "\n正在分析…\n" << flush;
-    result.analysis = analyze_result(question, &result.query, &source,
-                                     config->database.max_preview_rows);
-    print_analysis_result(&result);
+    TextResult analysis = analyze_result(question, &result.query, api);
+    print_analysis_result(&analysis);
 }
 free_query(&result.query);
 ```
 
-**讲解重点：** `read_schema` 取得真实结构，`request_text` 调用模型，`execute_reply` 识别标记或执行 SQL。`run_query` 只负责查询，CLI 先打印 SQL 和数据，再单独调用 `analyze_result`；分析结束后释放查询数组。无效输入、SQL 失败或已取消时不请求分析。
+**讲解重点：** `read_schema` 取得真实结构，`ask_model` 调用模型，`execute_reply` 识别标记或执行 SQL。`run_query` 只负责查询，CLI 先打印 SQL 和数据，再单独调用 `analyze_result`；分析结束后释放查询数组。无效输入、SQL 失败或已取消时不请求分析。
 
 ### 3.3 重点代码：打包 API 请求与获取回复
 
-来源：[src/llm.cpp：request_text](../src/llm.cpp)，JSON 打包和回复解析的完整实现位于 [src/json.cpp](../src/json.cpp)。
+来源：[src/llm.cpp：ask_model](../src/llm.cpp)，JSON 打包和回复解析的完整实现位于 [src/json.cpp](../src/json.cpp)。
 
 ```cpp
-TextResult request = model_request_json(source);
-if (request.success && request.text.length() <= 524288) {
-    TextResult response = curl_post(&source->api, request.text);
-    if (response.success) {
-        result = read_model_response(response.text);
-    }
+string request = model_request_json(api, system, input);
+if (request.length() > request_limit) {
+    return failed_text("API");
 }
+TextResult response = curl_post(api, request);
+if (!response.success) {
+    return response;
+}
+TextResult result = read_model_response(response.text);
 ```
 
-**讲解重点：** `model_request_json` 将模型名称、system/user 消息和请求选项打包成 JSON；`curl_post` 在进程内发送 HTTPS；`read_model_response` 取出回复文字。这段代码同时用于 SQL 生成和结果分析，请求 JSON 上限为 512 KiB，失败信息在函数出口统一处理。
+**讲解重点：** `model_request_json` 将模型名称、system/user 消息和请求选项打包成 JSON；`curl_post` 在进程内发送 HTTPS；`read_model_response` 取出回复文字。这段代码同时用于 SQL 生成和结果分析，请求 JSON 上限为 4 MiB，消息只属于本次请求，取消了上下文复制和反复初始化。
 
 ### 3.4 重点代码：SQLite 逐行执行
 
@@ -180,21 +178,17 @@ if (code != SQLITE_ROW) {
 来源：[src/agent.cpp：analyze_result](../src/agent.cpp)。以下为完整函数。
 
 ```cpp
-TextResult analyze_result(string question, QueryResult *query, Completion *source, int row_limit) {
-    string input = "问题：" + question + "\nSQL：\n" + query->sql + "\n";
-    input += result_preview(query, row_limit);
-    // 分析使用独立提示词，不沿用第一次请求的“只返回 SQL”要求。
-    Status setup = start_completion(source, analysis_prompt, input);
-    if (setup.success == false) {
-        return failed_text("API");
+TextResult analyze_result(string question, QueryResult *query, ApiOptions *api) {
+    string input = "问题：" + question + "\nSQL：\n" + query->sql + "\n" + result_json(query);
+    TextResult result = ask_model(api, analysis_prompt, input);
+    if (result.error == "模型回复达到长度上限。") {
+        result.error = "分析输出达到上限。";
     }
-    TextResult result = request_text(source);
-    close_completion(source);
     return result;
 }
 ```
 
-**讲解重点：** 输入由当前问题、已执行 SQL 和 `result_preview` 组成，分析使用独立的 `analysis_prompt`。返回的 `TextResult` 保存在 `QueryRun.analysis` 中，查询数据则在 `QueryRun.query` 中；这样分析请求失败也能继续展示已有 SQL 和结果。
+**讲解重点：** 输入由当前问题、已执行 SQL 和 `result_json` 组成，分析使用独立的 `analysis_prompt`。返回的 `TextResult` 是 CLI 中的局部变量，查询数据、成功状态和错误保存在 `QueryRun.query` 中；这样分析请求失败也能继续展示已有 SQL 和结果。
 
 ### 3.6 重点代码：无效输入标记拦截
 
@@ -204,7 +198,6 @@ TextResult analyze_result(string question, QueryResult *query, Completion *sourc
 if (sql.text == invalid_query_marker) {
     // 无效输入到这里就结束，避免执行占位 SQL。
     result.invalid_input = true;
-    result.error = invalid_query_hint;
     return result;
 }
 ```
@@ -316,9 +309,56 @@ ORDER BY d.name;
 
 本次没有调用真实模型，也没有在 Windows/Linux 实机运行；本地 SQL 核对与 Mock 检查属于功能回归，不能作为新的模型准确率。检查程序和临时输出保存在源码目录外，项目继续不保留评测工具。
 
+**2026-11-10 请求、配置和结果结构精简后的验证：**
+
+本次改动以 `a581b5e` 为基线，源码从 1857 行降到 1646 行，减少 211 行（11.4%）；去掉空行和整行注释后从 1725 行降到 1538 行，减少 187 行（10.8%）。结构体从 15 个减到 11 个，函数从 81 个减到 76 个。配置字段从 11 个减到 4 个；结果从“行数组＋逐行单元格数组”改为一块连续单元格数组，模型调用取消持久上下文。
+
+终端和分析共用最多 2000 行、128 列、1 MiB 的结构化结果；单值 8 KiB、列名 256 字节，统一裁剪并标记完整性。模型输出上限固定为 8192 tokens，HTTP 请求体为 4 MiB，总超时为 120 秒。
+
+| 检查内容 | 本次结果 | 验证方式与范围 |
+|---|---|---|
+| 普通与 ASan/UBSan 构建 | 通过 | macOS、AppleClang 21 |
+| 功能及边界检查 | 66 项通过，无 sanitizer 报错 | 真实 SQLite；流程检查使用本地 Mock，检查程序位于源码目录外 |
+| 表结构保持一致 | 修改前后输出逐字一致 | college_2、company，以及包含复合主外键、中文视图和超过 2000 张表的临时库 |
+| 多表 JOIN 与结果类型 | 150 行、10 列，与独立 SQLite 结果一致 | 保留重名列、64 位整数显示、浮点格式、NULL、空文本和 BLOB 十六进制 |
+| 大结果与分析请求 | 转义后请求超过旧 512 KiB 上限，低于新 4 MiB 上限 | 1 MiB 整行截断；终端与分析行数及内容一致 |
+| 取消与分析失败 | 保留查询数据，取消退出码 130 | 含分析输出长度受限的明确提示 |
+| 配置与启动 | 通过 | 四个保留字段校验、旧数字字段忽略、空环境变量覆盖、中文相对路径和复制后的多配置目录布局 |
+| 真实模型查询与分析 | 四表查询返回 150 行、10 列，分析正常返回 2441 字 | 使用配置的 deepseek-flash，生成 SQL 在本地 SQLite 再次核对 |
+
+真实模型的汇总存在计数误差：SQLite 核对为 10 名学生、68 门不同课程、8 个学生院系、19 个课程院系；本次分析正确给出学生人数和学生院系数，但把不同课程数写成 76、课程院系数写成 15，课程院系记录数也有误差。查询数据与传给分析的范围已核对；模型分析正常返回不代表其中统计全部正确。本次改动未增加独立统计工具或改变 SQL 生成规则。
+
 当前没有完整 dev 集的本版本评测结果。只在一个数据库实例上比较结果，也不能证明 SQL 在其他数据实例上的语义等价。本地结果一致率与 Spider 官方 Test Suite Accuracy 使用不同的评价方法。
 
 Windows 与 Linux 的构建配置、Windows 中文参数适配和三平台 CI 定义保留；本报告汇总的实际运行记录来自 macOS。
+
+#### 2026-11-11 请求构建、响应接收与状态精简验证
+
+在上述 1646 行版本上完成三项精简：固定请求直接复用 `json_quote` 拼接，不再创建 cJSON 消息对象；HTTP 响应用 `string` 累积；查询成功状态与错误只保存在 `QueryRun.query`，分析结果改为 CLI 局部变量。源码降到 1527 行，减少 119 行（7.2%）；去掉空行和整行注释后从 1538 行降到 1425 行，结构体从 11 个降到 10 个。
+
+| 检查内容 | 结果 | 验证方式与范围 |
+|---|---|---|
+| 普通与 ASan/UBSan 构建 | 通过 | macOS、AppleClang 21 |
+| 数据库、配置与查询流程回归 | 66 项通过 | 复用上一轮检查，真实 SQLite；流程检查使用本地 Mock |
+| HTTPS 与终端行为对照 | 14 个场景的请求内容、标准输出、错误输出和退出码全部一致 | 修改前后代码均经真实 libcurl 连接本地 HTTPS 服务；临时检查程序仅指定测试证书，不改变生产证书配置 |
+| 分块与响应容量 | gzip 分块正常接收，解压后 2 MiB 可接收，超限中止 | 同时覆盖中文分析、分析失败保留数据、生成及分析阶段 Ctrl+C 取消 |
+| 真实模型查询与分析 | 返回学生总数 2000，分析成功 | 使用配置中的模型，生成 SQL 在只读 SQLite 连接中独立核对 |
+
+本轮未修改数据库、路径、配置和平台适配模块。检查程序与回执保存在 `/private/tmp/cpp-123-check/`，未增加项目测试目录或评测命令；此次查询核对用于功能验收。
+
+#### 2026-11-11 配置与条件判断精简验证（A、C、D）
+
+在 1527 行版本上统一四个配置字段的循环读取，合并简单布尔判断，并用 `sqlite3_stricmp` 替代授权函数名的手动转小写。自写 CPP 降到 1457 行，净减少 70 行；原有查询与分析流程、提示词、结果范围和错误文案保留。
+
+| 检查内容 | 结果 | 验证方式与范围 |
+|---|---|---|
+| 普通与 ASan/UBSan 构建 | 通过 | macOS、AppleClang 21 |
+| 修改前后行为对照 | 269 项通过，返回值、标准输出和错误输出一致 | 配置默认值与类型错误、环境变量覆盖、参数、路径、函数大小写和 SQL 拒绝边界 |
+| 字符判断 | 全部 256 种字节的空白判断与续字节判断一致 | 另核对 trim 和路径分隔符 |
+| 功能回归 | 55 项通过，无 sanitizer 报错 | 真实 SQLite；查询与分析流程使用本地 Mock |
+| 补充回归 | 11 项通过 | 大结果 JSON、旧数字配置忽略、中文路径、空环境变量和复制运行 |
+
+本轮没有请求真实模型，也没有修改 B 项终端清理或 E 项 JSON 包装。临时对照程序和结果保存在 `/private/tmp/cpp-acd-check/`；错误处理的进一步改进尚未实施。
 
 ## 5. 总结与展望
 

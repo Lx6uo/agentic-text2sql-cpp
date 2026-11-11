@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <new>
+#include <cassert>
 #include <curl/curl.h>
 #include <cJSON.h>
 #include <sqlite3.h>
@@ -31,54 +32,46 @@ struct TextResult {
     string error;
     string text;
 };
-// 查询和结果分析使用的超时、容量与行数限制。
-struct DatabaseOptions {
-    int timeout_ms = 5000;
-    int max_display_rows = 100;
-    int max_sql_bytes = 16384;
-    int max_result_bytes = 1048576;
-    int max_preview_rows = 100;
-};
+// 固定运行上限，终端与分析共用一份结果。
+const int query_row_limit = 2000;
+const int query_column_limit = 128;
+const int query_value_limit = 8192;
+const int query_name_limit = 256;
+const int query_result_limit = 1048576;
+const int sql_limit = 16384;
+const int sql_timeout_ms = 5000;
+const int api_timeout_seconds = 120;
+const int model_output_tokens = 8192;
+const int request_limit = 4 * 1024 * 1024;
 struct Database {
     sqlite3 *connection = nullptr;
-    DatabaseOptions options;
     bool internal = false;
     bool timed_out = false;
     double deadline = 0;
 };
-// 保留 SQLite 数据类型，供结果显示和分析使用。
+// NULL 单独标记，其他值在读取处转换成文本。
 struct Cell {
-    int type = SQLITE_NULL;
-    long long integer = 0;
-    double real = 0;
+    bool is_null = false;
     string text;
 };
-struct QueryRow {
-    Cell *cells = nullptr;
-};
-// 行数组一次分配，由调用者使用后调用 free_query 释放。
+// 单元格按行排列，一次分配，用完后调用 free_query。
 struct QueryResult {
     bool success = false;
     string error;
     string sql;
     int column_count = 0;
-    string columns[128];
+    string columns[query_column_limit];
     int row_count = 0;
-    QueryRow *rows = nullptr;
+    Cell *cells = nullptr;
     bool truncated = false;
-    bool timed_out = false;
-    bool cancelled = false;
 };
 struct ApiOptions {
     string base_url = "https://api.deepseek.com";
     string model = "deepseek-flash";
     string api_key;
-    int timeout_seconds = 45;
-    int max_tokens = 2048;
 };
 struct Config {
     ApiOptions api;
-    DatabaseOptions database;
     string database_path;
     string bundled_data;
 };
@@ -87,18 +80,9 @@ struct ConfigResult {
     string error;
     Config config;
 };
-struct Completion {
-    ApiOptions api;
-    // messages 保存本次请求上下文，用完后由 close_completion 释放。
-    cJSON *messages = nullptr;
-};
 struct QueryRun {
-    bool success = false;
-    bool api_error = false;
-    string error;
     bool invalid_input = false;
-    // 查询和分析分别记录状态，分析失败时仍可显示查询结果。
-    TextResult analysis;
+    // 成功状态和错误只保存在 query，分析由 CLI 单独处理。
     QueryResult query;
 };
 // 区分默认参数和显式参数，便于校验及确定优先级。
@@ -152,33 +136,15 @@ TextResult failed_text(string operation) {
     return result;
 }
 bool is_blank(char value) {
-    if (value == ' ') {
-        return true;
-    }
-    if (value == '\t') {
-        return true;
-    }
-    if (value == '\r') {
-        return true;
-    }
-    if (value == '\n') {
-        return true;
-    }
-    return false;
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n';
 }
 string trim(string text) {
     int first = 0;
     int last = (int)text.length() - 1;
-    while (first <= last) {
-        if (is_blank(text[first]) == false) {
-            break;
-        }
+    while (first <= last && is_blank(text[first])) {
         first++;
     }
-    while (last >= first) {
-        if (is_blank(text[last]) == false) {
-            break;
-        }
+    while (last >= first && is_blank(text[last])) {
         last--;
     }
     if (last < first) {
@@ -198,9 +164,3 @@ double now_ms() {
 }
 QueryResult execute_sql(Database *db, string sql, int row_limit = -1);
 QueryResult list_tables(Database *db);
-
-struct NumberResult {
-    bool success = false;
-    string error;
-    double number = 0;
-};

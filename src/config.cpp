@@ -1,22 +1,4 @@
 // 字段读取只返回成功/失败，配置错误在 load_config 出口统一处理。
-// 读取可选整数：缺省保留原值，填写时校验类型和范围。
-bool config_number(cJSON *object, const char *name, int *destination, int minimum, int maximum) {
-    if (json_has_field(object, name) == false) {
-        return true;
-    }
-    NumberResult value = read_json_number(object, name);
-    if (value.success == false) {
-        return false;
-    }
-    if (floor(value.number) != value.number) {
-        return false;
-    }
-    if (value.number < minimum || value.number > maximum) {
-        return false;
-    }
-    *destination = (int)value.number;
-    return true;
-}
 // 读取可选文本，缺省时保留原值，类型错误时返回失败。
 bool config_string(cJSON *object, const char *name, string *destination) {
     if (json_has_field(object, name) == false) {
@@ -35,60 +17,22 @@ ConfigResult load_config(string path, bool required) {
     result.error = error_message("配置");
     Config *config = &result.config;
     ApiOptions *api = &config->api;
-    DatabaseOptions *db = &config->database;
     bool valid = true;
     // 结构体已提供默认值，JSON 只覆盖实际填写的字段。
     if (file_exists(path)) {
         TextResult text = read_text(path, 65536);
         cJSON *object = json_parse(text.text);
         valid = text.success && json_is_object(object);
-        // 分区校验字段，任一类型或范围错误都会使配置失败。
-        cJSON *section = json_field(object, "api");
-        if (section != nullptr) {
-            if (json_is_object(section) == false) {
-                valid = false;
-            }
-            if (config_string(section, "base_url", &api->base_url) == false) {
-                valid = false;
-            }
-            if (config_string(section, "model", &api->model) == false) {
-                valid = false;
-            }
-            if (config_string(section, "api_key", &api->api_key) == false) {
-                valid = false;
-            }
-            if (config_number(section, "timeout_seconds", &api->timeout_seconds, 1, 600) == false) {
-                valid = false;
-            }
-            if (config_number(section, "max_tokens", &api->max_tokens, 1, 32768) == false) {
-                valid = false;
-            }
-        }
-        // 数据库分区集中设置查询结果和模型预览的上限。
-        section = json_field(object, "database");
-        if (section != nullptr) {
-            if (json_is_object(section) == false) {
-                valid = false;
-            }
-            if (config_string(section, "path", &config->database_path) == false) {
-                valid = false;
-            }
-            if (config_number(section, "timeout_ms", &db->timeout_ms, 1, 600000) == false) {
-                valid = false;
-            }
-            if (config_number(section, "max_display_rows", &db->max_display_rows, 1, 10000) ==
-                false) {
-                valid = false;
-            }
-            if (config_number(section, "max_preview_rows", &db->max_preview_rows, 1, 100) ==
-                false) {
-                valid = false;
-            }
-            if (config_number(section, "max_sql_bytes", &db->max_sql_bytes, 1, 65536) == false) {
-                valid = false;
-            }
-            if (config_number(section, "max_result_bytes", &db->max_result_bytes, 1024, 16777216) ==
-                false) {
+        // 字段名与目标字符串按位置对应，缺省字段保留默认值。
+        const char *sections[] = {"api", "api", "api", "database"};
+        const char *names[] = {"base_url", "model", "api_key", "path"};
+        string *destinations[] = {&api->base_url, &api->model, &api->api_key,
+                                  &config->database_path};
+        for (int i = 0; i < 4; i++) {
+            cJSON *section = json_field(object, sections[i]);
+            if (section != nullptr &&
+                (!json_is_object(section) ||
+                 !config_string(section, names[i], destinations[i]))) {
                 valid = false;
             }
         }
